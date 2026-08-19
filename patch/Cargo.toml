@@ -8,6 +8,10 @@ edition = "2021"
 [dependencies]
 # Compression and decompression of patch files.
 bidiff = "1.0.0"
+# Reconstruction, used only by the route_b_artifact tool to VERIFY that the
+# artifact it just produced does not read the base. Same crate the updater
+# inflates with, so the check exercises the real reader.
+bipatch = "1.0.0"
 # Pipe is a simple in-memory pipe implementation, there might be a std way too?
 pipe = "0.4.0"
 # comde is a wrapper around several compression libraries.
