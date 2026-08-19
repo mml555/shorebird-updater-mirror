@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::cache::lifecycle::{BootRecovery, BootSuccess};
 use crate::events::PatchEvent;
 use crate::yaml::PatchVerificationMode;
 
@@ -321,12 +322,12 @@ impl UpdaterState {
     /// if no boot was in flight.
     ///
     /// [`BOOT_FAILURE_THRESHOLD`]: crate::cache::lifecycle::BOOT_FAILURE_THRESHOLD
-    pub fn detect_boot_crash_on_init(&mut self) -> Result<Option<usize>> {
+    pub fn detect_boot_crash_on_init(&mut self) -> Result<BootRecovery> {
         self.lifecycle.detect_boot_crash_on_init()
     }
 
     /// Records that the in-flight boot succeeded.
-    pub fn record_boot_success(&mut self) -> Result<()> {
+    pub fn record_boot_success(&mut self) -> Result<BootSuccess> {
         self.lifecycle.record_boot_success()
     }
 
@@ -541,6 +542,10 @@ mod tests {
             message: None,
             failure_category: None,
             event_id: Some(format!("id-{patch_number}")),
+            outcome: None,
+            ambiguous_attempt_count: None,
+            boot_failure_threshold: None,
+            boot_started_at: None,
         }
     }
 

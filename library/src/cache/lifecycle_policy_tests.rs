@@ -65,7 +65,7 @@ impl Device {
 
     /// A fresh process. Reloads from disk and runs init-time crash recovery,
     /// which is what every real process start does.
-    fn new_process(&self) -> (PatchLifecycle, Option<usize>) {
+    fn new_process(&self) -> (PatchLifecycle, BootRecovery) {
         let mut l = reload_at(self.tmp.path()).with_boot_failure_threshold(self.threshold);
         let recovered = l.detect_boot_crash_on_init().unwrap();
         (l, recovered)
@@ -101,7 +101,17 @@ impl Device {
     }
 
     /// Init-only process — how the NEXT launch observes a prior vanish.
+    /// Returns the RETIRED patch, so these assertions keep reading as "did this
+    /// retire?" now that recovery reports richer classification.
     fn recover(&self) -> Option<usize> {
+        match self.new_process().1 {
+            BootRecovery::Retired { patch, .. } => Some(patch),
+            _ => None,
+        }
+    }
+
+    /// The full classification, for tests about the telemetry payload.
+    fn recover_classified(&self) -> BootRecovery {
         self.new_process().1
     }
 
@@ -421,4 +431,97 @@ fn threshold_one_reproduces_single_strike_behaviour() {
     d.launch_vanish(1);
     assert_eq!(d.recover(), Some(1), "threshold 1 must retire on first death");
     assert!(d.is_bad(1));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CLASSIFICATION PAYLOAD — what telemetry will actually carry
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_retry_is_classified_as_ambiguous_and_carries_its_attempt() {
+    let d = Device::new(3);
+    d.install(1);
+    d.launch_vanish(1);
+    match d.recover_classified() {
+        BootRecovery::Retried {
+            patch,
+            attempt,
+            threshold,
+            boot_started_at,
+        } => {
+            assert_eq!(patch, 1);
+            assert_eq!(attempt, 1, "first ambiguity must report attempt 1");
+            assert_eq!(threshold, 3, "the in-force threshold travels with the event");
+            assert!(boot_started_at.is_some(), "boot age must be observable");
+        }
+        other => panic!("expected Retried, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_retirement_reports_the_attempts_that_produced_it() {
+    let d = Device::new(2);
+    d.install(1);
+    d.launch_vanish(1);
+    d.recover();
+    d.launch_vanish(1);
+    match d.recover_classified() {
+        BootRecovery::Retired {
+            patch,
+            attempts,
+            threshold,
+            ..
+        } => {
+            assert_eq!(patch, 1);
+            assert_eq!(attempts, 2);
+            assert_eq!(threshold, 2);
+        }
+        other => panic!("expected Retired, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_idle_init_classifies_as_idle() {
+    let d = Device::new(2);
+    d.install(1);
+    assert_eq!(d.recover_classified(), BootRecovery::Idle);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE RECOVERY GUARD — a clean boot must never enter the recovery population
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_clean_first_boot_reports_no_prior_ambiguity() {
+    // If recovery were inferred from "success happened and the counter is now
+    // zero", EVERY healthy boot would look like a recovery and
+    // P(recovery | first ambiguity) would be meaningless.
+    let d = Device::new(2);
+    d.install(1);
+    let (mut l, _) = d.new_process();
+    l.record_boot_start(1).unwrap();
+    let s = l.record_boot_success().unwrap();
+    assert_eq!(s.patch, 1);
+    assert_eq!(
+        s.prior_ambiguous_attempts, 0,
+        "a clean boot is not a recovery"
+    );
+}
+
+#[test]
+fn a_success_after_ambiguity_reports_the_ambiguity_that_preceded_it() {
+    let d = Device::new(3);
+    d.install(1);
+    d.launch_vanish(1);
+    d.recover();
+    d.launch_vanish(1);
+    d.recover();
+
+    let (mut l, _) = d.new_process();
+    l.record_boot_start(1).unwrap();
+    let s = l.record_boot_success().unwrap();
+    assert_eq!(
+        s.prior_ambiguous_attempts, 2,
+        "two ambiguous deaths preceded this success"
+    );
 }
