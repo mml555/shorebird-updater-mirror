@@ -1259,6 +1259,16 @@ mod tests {
         }
     }
 
+    /// Polls `cond` until true or the deadline passes. Replaces fixed sleeps
+    /// used to wait for work on a spawned thread — a fixed sleep asserts a
+    /// timing guess, this asserts the condition.
+    fn wait_for(cond: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !cond() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     pub fn init_for_testing(tmp_dir: &TempDir, base_url: Option<&str>) {
         testing_reset_config();
         let cache_dir = tmp_dir.path().to_str().unwrap().to_string();
@@ -1371,6 +1381,52 @@ mod tests {
         Ok(())
     }
 
+    /// Owns every global the production-entrypoint tests depend on, resetting
+    /// on BOTH acquisition and drop.
+    ///
+    /// Resetting on drop is the half that matters: a test that panics or returns
+    /// early otherwise leaves the global config populated for whatever runs
+    /// next. `#[serial]` orders these tests but does not isolate them, so
+    /// without this they are only USUALLY independent — and "usually" is exactly
+    /// what makes a lifecycle regression arguable later.
+    struct GlobalTestState;
+
+    impl GlobalTestState {
+        fn acquire() -> Self {
+            crate::config::testing_reset_config();
+            GlobalTestState
+        }
+    }
+
+    impl Drop for GlobalTestState {
+        fn drop(&mut self) {
+            crate::config::testing_reset_config();
+        }
+    }
+
+    /// The poison-recovery contract, proven rather than assumed.
+    ///
+    /// Deliberately poisons the global config lock, then asserts the next
+    /// acquisition still succeeds. Without recovery this test's second half
+    /// panics with `PoisonError` — which is precisely the failure that turned
+    /// one real failure into 48 on 2026-08-19.
+    #[serial]
+    #[test]
+    fn a_poisoned_global_lock_does_not_disable_the_rest_of_the_suite() {
+        let _g = GlobalTestState::acquire();
+
+        let poisoned = std::thread::spawn(|| {
+            crate::config::with_config_mut(|_| panic!("deliberate poison"));
+        })
+        .join();
+        assert!(poisoned.is_err(), "the helper thread must actually panic");
+
+        // The lock is now poisoned. It must still be usable.
+        crate::config::with_config_mut(|config| {
+            assert!(config.is_none(), "reset state should be observable");
+        });
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // PRODUCTION-ENTRYPOINT CONTRACT — C1-C4 through the path that SHIPS.
     //
@@ -1402,6 +1458,7 @@ mod tests {
     #[serial]
     #[test]
     fn prod_c3_one_unfinished_boot_keeps_the_patch_eligible() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
         let tmp_dir = TempDir::new().unwrap();
         init_for_testing(&tmp_dir, None);
         install_fake_patch(1)?;
@@ -1419,6 +1476,7 @@ mod tests {
     #[serial]
     #[test]
     fn prod_c4_second_consecutive_unfinished_boot_retires() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
         let tmp_dir = TempDir::new().unwrap();
         init_for_testing(&tmp_dir, None);
         install_fake_patch(1)?;
@@ -1438,6 +1496,7 @@ mod tests {
     #[serial]
     #[test]
     fn prod_c3_success_between_ambiguous_deaths_resets_the_tally() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
         let tmp_dir = TempDir::new().unwrap();
         init_for_testing(&tmp_dir, None);
         install_fake_patch(1)?;
@@ -1461,6 +1520,7 @@ mod tests {
     #[serial]
     #[test]
     fn prod_c2_explicit_failure_retires_immediately() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
         let tmp_dir = TempDir::new().unwrap();
         init_for_testing(&tmp_dir, None);
         install_fake_patch(1)?;
@@ -1475,6 +1535,7 @@ mod tests {
     #[serial]
     #[test]
     fn prod_tally_does_not_transfer_between_patches() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
         let tmp_dir = TempDir::new().unwrap();
         init_for_testing(&tmp_dir, None);
         install_fake_patch(1)?;
@@ -1694,12 +1755,17 @@ patch_verification: bogus_mode
         let result = super::update(None)?;
         assert_eq!(result, crate::UpdateStatus::UpdateInstalled);
 
-        // This is gross.
-        // Because we spawn a thread to report the patch download event, we need to give it time
-        // to run before we can assert that the event was sent. The more correct way to do this
-        // would be to obtain the join handle from the thread and wait for it to finish, but that
-        // would require a change to the API of the `update` function, which seems worse.
-        thread::sleep(Duration::from_millis(10));
+        // The event is reported from a thread `update` spawns, so the assertion
+        // has to wait for it. This used to be a flat `sleep(10ms)`, which is a
+        // RACE, not a wait: under load the thread had not run and the test
+        // failed. It was reproducible roughly once in 25 full-suite runs, and
+        // because a panicking test poisoned the global config lock it surfaced
+        // as dozens of unrelated failures.
+        //
+        // Waiting on the OBSERVABLE CONDITION instead is both faster in the
+        // common case and robust under load. The ceiling is generous because it
+        // is only ever reached when the test is genuinely going to fail.
+        wait_for(|| event_mock.matched());
 
         // Assert that the patch download event was sent.
         event_mock.expect(1).assert();
@@ -1756,12 +1822,17 @@ patch_verification: bogus_mode
         let result = super::update(None)?;
         assert_eq!(result, crate::UpdateStatus::UpdateInstalled);
 
-        // This is gross.
-        // Because we spawn a thread to report the patch download event, we need to give it time
-        // to run before we can assert that the event was sent. The more correct way to do this
-        // would be to obtain the join handle from the thread and wait for it to finish, but that
-        // would require a change to the API of the `update` function, which seems worse.
-        thread::sleep(Duration::from_millis(10));
+        // The event is reported from a thread `update` spawns, so the assertion
+        // has to wait for it. This used to be a flat `sleep(10ms)`, which is a
+        // RACE, not a wait: under load the thread had not run and the test
+        // failed. It was reproducible roughly once in 25 full-suite runs, and
+        // because a panicking test poisoned the global config lock it surfaced
+        // as dozens of unrelated failures.
+        //
+        // Waiting on the OBSERVABLE CONDITION instead is both faster in the
+        // common case and robust under load. The ceiling is generous because it
+        // is only ever reached when the test is genuinely going to fail.
+        wait_for(|| event_mock.matched());
 
         // Assert that the patch download event was sent.
         event_mock.expect(1).assert();
