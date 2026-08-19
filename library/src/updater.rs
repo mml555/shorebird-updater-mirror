@@ -473,6 +473,8 @@ fn require_signature_verifier(config: &YamlConfig, has_verifier: bool) -> Result
 pub fn handle_prior_boot_failure_if_necessary() -> Result<(), InitError> {
     with_config(|config| {
         let (_lock, mut state) = load_state(config)?;
+        // Diagnostics are captured BEFORE the decision, while the breadcrumb is
+        // still set and the artifact is still on disk.
         if let Some(patch) = state.currently_booting_patch() {
             let boot_time_info = state
                 .boot_started_at()
@@ -484,20 +486,33 @@ pub fn handle_prior_boot_failure_if_necessary() -> Result<(), InitError> {
                 Err(_) => "file_ok=false,file_missing".to_string(),
             };
 
-            let now = crate::time::unix_timestamp();
-            let message = format!(
-                "crash_recovery: patch {} failed to boot (detected_at={now}{boot_time_info},{file_info})",
-                patch.number
-            );
-
-            state.record_boot_failure_for_patch(patch.number)?;
-            state.queue_event(PatchEvent::new(
-                config,
-                EventType::PatchInstallFailure,
-                patch.number,
-                state.client_id(),
-                Some(&message),
-            ))?;
+            // C3/C4. This used to call `record_boot_failure_for_patch` directly,
+            // which retired the patch on the FIRST un-succeeded boot — so an
+            // ordinary process death (watchdog, jetsam, a swipe during launch)
+            // permanently tombstoned a healthy patch. The breadcrumb says the
+            // boot did not finish; it does not say the patch is at fault.
+            //
+            // `detect_boot_crash_on_init` applies the threshold: below it, clear
+            // the breadcrumb and let the patch try again; at it, retire.
+            //
+            // NOTHING IS QUEUED ON THE RETRY PATH YET. A first ambiguous death is
+            // not a patch failure, and reporting it as `PatchInstallFailure`
+            // would assert exactly what this branch refuses to assert. The
+            // non-terminal lifecycle event is a separate, deliberate change —
+            // see `selfhost/LIFECYCLE_POLICY.md`.
+            if let Some(retired) = state.detect_boot_crash_on_init()? {
+                let now = crate::time::unix_timestamp();
+                let message = format!(
+                    "crash_recovery: patch {retired} failed to boot (detected_at={now}{boot_time_info},{file_info})",
+                );
+                state.queue_event(PatchEvent::new(
+                    config,
+                    EventType::PatchInstallFailure,
+                    retired,
+                    state.client_id(),
+                    Some(&message),
+                ))?;
+            }
         }
 
         Ok(())
@@ -1805,47 +1820,123 @@ mod tests {
         Ok(())
     }
 
-    /// **PINS A KNOWN GAP — see `selfhost/LIFECYCLE_POLICY.md` C3/C4.**
-    ///
-    /// The production init path is SINGLE-STRIKE for ambiguous deaths.
-    /// `BOOT_FAILURE_THRESHOLD` and `detect_boot_crash_on_init` — the
-    /// threshold-governed retry added by `0010` — are **NOT REACHABLE FROM
-    /// PRODUCTION**. `init` calls `handle_prior_boot_failure_if_necessary`,
-    /// which calls `record_boot_failure_for_patch` directly and never consults
-    /// the tally. `detect_boot_crash_on_init` has no non-test caller.
-    ///
-    /// So a single process death before the success boundary — a watchdog kill,
-    /// jetsam, a user swipe — permanently tombstones a healthy patch on that
-    /// device today. That is exactly the outcome C3 exists to prevent.
-    ///
-    /// This test asserts the CURRENT behaviour so the gap is visible rather
-    /// than implied. **If C3/C4 are wired in, this test is expected to FAIL and
-    /// must be replaced by its threshold-aware equivalent.**
+    // ─────────────────────────────────────────────────────────────────────
+    // PRODUCTION-ENTRYPOINT CONTRACT — C1-C4 through the path that SHIPS.
+    //
+    // The 18 tests in `cache::lifecycle_policy_tests` prove the policy on
+    // `detect_boot_crash_on_init`. Production does not call it. These tests go
+    // through `init` -> `handle_prior_boot_failure_if_necessary` instead, so
+    // they prove the PRODUCT uses the mechanism rather than that the mechanism
+    // exists. See `selfhost/LIFECYCLE_POLICY.md`.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Reads the tally at production level.
+    fn boot_tally() -> (u32, Option<usize>) {
+        with_state(|state| {
+            let p = state.lifecycle().pointers();
+            Ok((p.boot_attempt_count, p.last_boot_attempt_patch))
+        })
+        .unwrap()
+    }
+
+    fn patch_is_bad(n: usize) -> bool {
+        with_state(|state| Ok(state.is_known_bad_patch(n))).unwrap()
+    }
+
+    fn next_boot() -> Option<usize> {
+        crate::with_mut_state(|state| Ok(state.next_boot_patch().map(|p| p.number))).unwrap()
+    }
+
+    /// C3: one unfinished boot must leave the patch eligible.
     #[serial]
     #[test]
-    fn production_init_is_single_strike_the_threshold_is_not_wired_in() -> anyhow::Result<()> {
+    fn prod_c3_one_unfinished_boot_keeps_the_patch_eligible() -> anyhow::Result<()> {
         let tmp_dir = TempDir::new().unwrap();
         init_for_testing(&tmp_dir, None);
         install_fake_patch(1)?;
 
-        // ONE boot that never records success.
         crate::report_launch_start()?;
-        with_state(|state| {
-            assert_eq!(state.currently_booting_patch().unwrap().number, 1);
-            Ok(())
-        })?;
+        init_for_testing(&tmp_dir, None); // next process
 
-        // Next process start.
+        assert!(!patch_is_bad(1), "C3: one ambiguous death must not retire");
+        assert_eq!(next_boot(), Some(1), "C3: the patch must remain the target");
+        assert_eq!(boot_tally().0, 1, "C3: the tally must record the attempt");
+        Ok(())
+    }
+
+    /// C4: the second consecutive unfinished boot retires.
+    #[serial]
+    #[test]
+    fn prod_c4_second_consecutive_unfinished_boot_retires() -> anyhow::Result<()> {
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+        assert!(!patch_is_bad(1), "first ambiguous death must not retire");
+
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+        assert!(patch_is_bad(1), "C4: the second must retire");
+        Ok(())
+    }
+
+    /// C3: a success between two ambiguous deaths resets the tally, so they are
+    /// not consecutive and must not retire.
+    #[serial]
+    #[test]
+    fn prod_c3_success_between_ambiguous_deaths_resets_the_tally() -> anyhow::Result<()> {
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
         init_for_testing(&tmp_dir, None);
 
-        crate::with_mut_state(|state| {
-            assert!(
-                state.next_boot_patch().is_none(),
-                "GAP: one ambiguous death retires the patch. With C3 wired in, \
-                 patch 1 would still be the boot target here."
-            );
-            Ok(())
-        })?;
+        crate::report_launch_start()?;
+        crate::report_launch_success()?;
+        assert_eq!(boot_tally().0, 0, "success must clear the tally");
+
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+        assert!(!patch_is_bad(1), "non-consecutive deaths must not retire");
+        assert_eq!(boot_tally().0, 1, "tally must be 1, not 2");
+        Ok(())
+    }
+
+    /// C2 CONTROL: this already holds today. If it ever fails, the fix has
+    /// weakened the explicit path while strengthening the ambiguous one.
+    #[serial]
+    #[test]
+    fn prod_c2_explicit_failure_retires_immediately() -> anyhow::Result<()> {
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
+        crate::report_launch_failure()?;
+        assert!(patch_is_bad(1), "C2: explicit failure retires on first strike");
+        Ok(())
+    }
+
+    /// The tally belongs to a patch identity, not to the device.
+    #[serial]
+    #[test]
+    fn prod_tally_does_not_transfer_between_patches() -> anyhow::Result<()> {
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+
+        install_fake_patch(2)?; // patch 2 becomes the target
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+
+        assert!(!patch_is_bad(2), "patch 2 must not inherit patch 1's tally");
+        assert_eq!(boot_tally().1, Some(2), "the tally must now belong to patch 2");
         Ok(())
     }
 
@@ -1868,6 +1959,11 @@ mod tests {
             Ok(())
         })?;
 
+        // C3: reach the threshold so the terminal event is actually queued.
+        for _ in 1..crate::cache::lifecycle::BOOT_FAILURE_THRESHOLD {
+            crate::report_launch_start()?;
+            init_for_testing(&tmp_dir, None);
+        }
         // Pretend we started to boot from it, but don't report success or failure.
         crate::report_launch_start()?;
         with_state(|state| {
@@ -3961,6 +4057,19 @@ mod state_recovery_tests {
     /// When patches_state.json is corrupt, PatchManager should fall back to
     /// default (empty) state. The updater should still function — no panic,
     /// no boot from stale patch.
+    /// C3: a single un-succeeded boot is a RETRY, not a retirement. A test that
+    /// wants the patch RETIRED must reach `BOOT_FAILURE_THRESHOLD`. This performs
+    /// the leading un-succeeded boots so the caller's next one is the deciding
+    /// attempt. Threshold-agnostic on purpose — if the threshold changes, these
+    /// tests follow it instead of silently asserting the old number.
+    fn boots_before_threshold(tmp_dir: &TempDir) -> Result<()> {
+        for _ in 1..crate::cache::lifecycle::BOOT_FAILURE_THRESHOLD {
+            report_launch_start()?;
+            init_for_testing(tmp_dir, None);
+        }
+        Ok(())
+    }
+
     #[serial]
     #[test]
     fn corrupt_patches_state_resets_to_empty() -> Result<()> {
@@ -4074,6 +4183,7 @@ mod state_recovery_tests {
         init_for_testing(&tmp_dir, None);
 
         install_fake_patch(1)?;
+        boots_before_threshold(&tmp_dir)?;
         // Start booting — sets currently_booting_patch.
         report_launch_start()?;
 
@@ -4114,6 +4224,7 @@ mod state_recovery_tests {
         init_for_testing(&tmp_dir, None);
 
         install_fake_patch(1)?;
+        boots_before_threshold(&tmp_dir)?;
         report_launch_start()?;
         // Don't call report_launch_success — simulate crash.
 
@@ -4160,6 +4271,7 @@ mod state_recovery_tests {
         init_for_testing(&tmp_dir, None);
 
         install_fake_patch(1)?;
+        boots_before_threshold(&tmp_dir)?;
         report_launch_start()?;
 
         // Delete the patch artifact to simulate file going missing.
@@ -4192,6 +4304,7 @@ mod state_recovery_tests {
         init_for_testing(&tmp_dir, None);
 
         install_fake_patch(1)?;
+        boots_before_threshold(&tmp_dir)?;
         report_launch_start()?;
 
         // Manually clear boot_started_at from the pointers file to
@@ -4235,6 +4348,7 @@ mod state_recovery_tests {
 
         // Install patch 2 (newer), start booting it.
         install_fake_patch(2)?;
+        boots_before_threshold(&tmp_dir)?;
         report_launch_start()?;
         // Crash — don't report success.
 
@@ -5064,27 +5178,35 @@ mod multi_engine_tests {
         init_for_testing(&tmp_dir, None);
         set_noop_network_hooks();
 
-        // The patch should NOT be marked as bad (Engine A booted successfully!)
-        // But when report_launch_start() is called multiple times at the Rust level,
-        // the second call re-sets currently_booting_patch, causing a false positive.
+        // C3 NOW PREVENTS THIS FALSE POSITIVE ON THE FIRST OCCURRENCE.
         //
-        // NOTE: The C++ fix in TryLoadFromPatch() uses std::once_flag to prevent
-        // multiple calls, so this scenario cannot happen in production. This test
-        // documents the Rust API behavior when called directly without that guard.
+        // This test previously asserted `is_known_bad_patch(1)` and documented
+        // the result as "the patch is incorrectly marked as known bad" — a
+        // healthy patch, one that Engine A had already booted successfully,
+        // rolled back because Engine B re-set the breadcrumb and the process
+        // then died. That is exactly the harm C3 exists to prevent, and it is
+        // now prevented: the un-succeeded boot is ambiguous, so the patch is
+        // RETRIED rather than retired.
+        //
+        // Defence in depth, not a replacement: the C++ `std::once_flag` guard in
+        // TryLoadFromPatch() still stops the double `report_launch_start()` from
+        // happening in production. C3 means that if such a guard is ever missed,
+        // the cost is one retry rather than a permanently lost patch.
+        //
+        // NOTE the residual exposure: a SECOND consecutive occurrence would
+        // still retire the patch, because two un-succeeded boots are
+        // indistinguishable from a patch that genuinely breaks Dart. C3 bounds
+        // this failure mode; it does not eliminate it.
         with_mut_state(|state| {
-            // When report_launch_start() is called multiple times without a guard,
-            // the patch is incorrectly marked as known bad.
             assert!(
-                state.is_known_bad_patch(1),
-                "Expected patch to be marked bad when report_launch_start() called twice"
+                !state.is_known_bad_patch(1),
+                "C3: one ambiguous death must not roll back a patch that booted successfully"
             );
-
-            // The next_boot_patch is None because patch was marked as bad
-            assert!(
-                state.next_boot_patch().is_none(),
-                "Expected next_boot_patch to be None after patch marked bad"
+            assert_eq!(
+                state.next_boot_patch().map(|p| p.number),
+                Some(1),
+                "C3: the patch must remain the boot target after a single retry"
             );
-
             Ok(())
         })?;
 
