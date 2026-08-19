@@ -1805,6 +1805,50 @@ mod tests {
         Ok(())
     }
 
+    /// **PINS A KNOWN GAP — see `selfhost/LIFECYCLE_POLICY.md` C3/C4.**
+    ///
+    /// The production init path is SINGLE-STRIKE for ambiguous deaths.
+    /// `BOOT_FAILURE_THRESHOLD` and `detect_boot_crash_on_init` — the
+    /// threshold-governed retry added by `0010` — are **NOT REACHABLE FROM
+    /// PRODUCTION**. `init` calls `handle_prior_boot_failure_if_necessary`,
+    /// which calls `record_boot_failure_for_patch` directly and never consults
+    /// the tally. `detect_boot_crash_on_init` has no non-test caller.
+    ///
+    /// So a single process death before the success boundary — a watchdog kill,
+    /// jetsam, a user swipe — permanently tombstones a healthy patch on that
+    /// device today. That is exactly the outcome C3 exists to prevent.
+    ///
+    /// This test asserts the CURRENT behaviour so the gap is visible rather
+    /// than implied. **If C3/C4 are wired in, this test is expected to FAIL and
+    /// must be replaced by its threshold-aware equivalent.**
+    #[serial]
+    #[test]
+    fn production_init_is_single_strike_the_threshold_is_not_wired_in() -> anyhow::Result<()> {
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        // ONE boot that never records success.
+        crate::report_launch_start()?;
+        with_state(|state| {
+            assert_eq!(state.currently_booting_patch().unwrap().number, 1);
+            Ok(())
+        })?;
+
+        // Next process start.
+        init_for_testing(&tmp_dir, None);
+
+        crate::with_mut_state(|state| {
+            assert!(
+                state.next_boot_patch().is_none(),
+                "GAP: one ambiguous death retires the patch. With C3 wired in, \
+                 patch 1 would still be the boot target here."
+            );
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     #[serial]
     #[test]
     fn reports_patch_install_failure_if_patch_was_booting() -> anyhow::Result<()> {
