@@ -283,6 +283,20 @@ impl UpdaterState {
         self.lifecycle.record_boot_failure(patch_number)
     }
 
+    /// C3/C4: threshold-governed recovery at process init. If a prior boot left
+    /// its breadcrumb set, that boot recorded neither success nor an explicit
+    /// failure — which says the boot did not finish, NOT that the patch is at
+    /// fault. Below [`BOOT_FAILURE_THRESHOLD`] this clears the breadcrumb and
+    /// lets the patch try again; at the threshold it retires it.
+    ///
+    /// Returns the patch number if one was RETIRED, `None` if it was retried or
+    /// if no boot was in flight.
+    ///
+    /// [`BOOT_FAILURE_THRESHOLD`]: crate::cache::lifecycle::BOOT_FAILURE_THRESHOLD
+    pub fn detect_boot_crash_on_init(&mut self) -> Result<Option<usize>> {
+        self.lifecycle.detect_boot_crash_on_init()
+    }
+
     /// Records that the in-flight boot succeeded.
     pub fn record_boot_success(&mut self) -> Result<()> {
         self.lifecycle.record_boot_success()
