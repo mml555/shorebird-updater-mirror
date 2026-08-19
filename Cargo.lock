@@ -1028,6 +1028,7 @@ name = "patch"
 version = "0.2.1"
 dependencies = [
  "bidiff",
+ "bipatch",
  "sha2",
  "zstd",
 ]

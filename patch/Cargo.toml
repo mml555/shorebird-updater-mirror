@@ -9,6 +9,10 @@ edition = "2021"
 # Compression and decompression of patch files.
 bidiff = "1.0.0"
 zstd = { version = "0.14.3", default-features = false }
+# Reconstruction, used only by the route_b_artifact tool to VERIFY that the
+# artifact it just produced does not read the base. Same crates the updater
+# inflates with (zstd decoder -> bipatch), so the check exercises the real reader.
+bipatch = "1.0.0"
 
 # Only used by string_patch tool:
 # I don't know how to make them per-target dependencies.
