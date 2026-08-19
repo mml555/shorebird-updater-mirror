@@ -200,6 +200,15 @@ pub struct PatchLifecycle {
     /// back to `Fresh`.
     download_root: PathBuf,
     pointers: ReleasePointers,
+    /// Consecutive un-succeeded boots required before a patch is tombstoned.
+    /// Defaults to [`BOOT_FAILURE_THRESHOLD`] and is only ever varied by tests.
+    ///
+    /// It is a FIELD rather than a bare `const` read at the use site so the
+    /// policy suite can prove the RULE ("retire on the Nth consecutive
+    /// un-succeeded boot") across several N, instead of asserting one magic
+    /// number in every case. A suite that only ever exercises 2 cannot tell a
+    /// correct threshold implementation from one that happens to agree with 2.
+    boot_failure_threshold: u32,
 }
 
 impl PatchLifecycle {
@@ -229,7 +238,18 @@ impl PatchLifecycle {
             state_root,
             download_root,
             pointers,
+            boot_failure_threshold: BOOT_FAILURE_THRESHOLD,
         }
+    }
+
+    /// Overrides the boot-failure threshold. **Test-only.** Production always
+    /// uses [`BOOT_FAILURE_THRESHOLD`]; there is no config or server control
+    /// over this, deliberately, because a remotely-lowered threshold would be a
+    /// way to mass-tombstone healthy patches.
+    #[cfg(test)]
+    pub fn with_boot_failure_threshold(mut self, threshold: u32) -> Self {
+        self.boot_failure_threshold = threshold;
+        self
     }
 
     pub fn pointers(&self) -> &ReleasePointers {
@@ -656,12 +676,12 @@ impl PatchLifecycle {
         // genuinely breaks Dart will fail the next boot too, and the one after
         // that, so the tally reaches the threshold and it is backed out with
         // only one extra crash spent.
-        if self.pointers.boot_attempt_count < BOOT_FAILURE_THRESHOLD {
+        if self.pointers.boot_attempt_count < self.boot_failure_threshold {
             shorebird_info!(
                 "boot {} of patch {} did not record success; retrying (threshold {})",
                 self.pointers.boot_attempt_count,
                 n,
-                BOOT_FAILURE_THRESHOLD
+                self.boot_failure_threshold
             );
             // Clear ONLY the in-flight breadcrumb. `boot_attempt_count` and
             // `last_boot_attempt_patch` survive deliberately — they are the
