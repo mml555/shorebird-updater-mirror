@@ -15,6 +15,28 @@ pub enum EventType {
     PatchInstallFailure,
     PatchDownload,
     PatchUpdateFailure,
+    /// A NON-TERMINAL boot-lifecycle observation.
+    ///
+    /// Deliberately NOT `PatchInstallFailure`. A first ambiguous unfinished boot
+    /// is not evidence that the patch or its installation failed, and reporting
+    /// it under a failure type would assert exactly what the state machine
+    /// refuses to assert — as well as corrupting existing failure metrics.
+    PatchBootLifecycle,
+}
+
+/// What a [`EventType::PatchBootLifecycle`] event observed.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootOutcome {
+    /// A boot did not finish; below threshold, so the patch was RETRIED.
+    /// Evidence about the boot, NOT about the patch.
+    AmbiguousBootRetry,
+    /// A patch booted successfully after prior ambiguity. This is the
+    /// population that justifies having a threshold at all, and the one the
+    /// server could never see while only terminal outcomes were reported.
+    RecoveredAfterAmbiguity,
+    /// Ambiguity reached the threshold and the patch was retired.
+    RetiredAfterAmbiguity,
 }
 
 impl Serialize for EventType {
@@ -27,6 +49,7 @@ impl Serialize for EventType {
             EventType::PatchInstallFailure => "__patch_install_failure__",
             EventType::PatchDownload => "__patch_download__",
             EventType::PatchUpdateFailure => "__patch_update_failure__",
+            EventType::PatchBootLifecycle => "__patch_boot_lifecycle__",
         })
     }
 }
@@ -42,6 +65,7 @@ impl<'de> Deserialize<'de> for EventType {
             "__patch_install_failure__" => Ok(EventType::PatchInstallFailure),
             "__patch_download__" => Ok(EventType::PatchDownload),
             "__patch_update_failure__" => Ok(EventType::PatchUpdateFailure),
+            "__patch_boot_lifecycle__" => Ok(EventType::PatchBootLifecycle),
             _ => Err(serde::de::Error::custom(format!("Unknown event type: {s}"))),
         }
     }
@@ -80,6 +104,37 @@ pub struct PatchEvent {
     /// An optional message to be sent with the event.
     /// Care should be taken that this field *never* contain PII or sensitive information.
     pub message: Option<String>,
+
+    // ---- Boot-lifecycle fields ----
+    //
+    // All optional and skipped when absent, so every pre-existing event type
+    // serialises BYTE-IDENTICALLY and the server's dedupe key is unperturbed.
+    //
+    // No new correlation identifier is introduced: the envelope already carries
+    // `client_id`, `app_id`, `release_version` and `patch_number`, and
+    // (app_id, release_version) uniquely identifies a release server-side while
+    // patch numbers are unique only WITHIN a release. Timestamps are ordering
+    // and evidence, never identity.
+    /// What was observed. `None` for every non-lifecycle event.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub outcome: Option<BootOutcome>,
+
+    /// Un-succeeded boots of this patch counted so far. On a recovery this is
+    /// the ambiguity that PRECEDED the success, captured before it was cleared.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub ambiguous_attempt_count: Option<u32>,
+
+    /// The threshold in force on the device, so fleet data stays interpretable
+    /// if the shipped value ever changes.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub boot_failure_threshold: Option<u32>,
+
+    /// When the observed boot began. Retained even though policy currently
+    /// IGNORES boot age, so it can later be determined whether a 40ms
+    /// unfinished boot and a 40-day stale breadcrumb are the same population —
+    /// before any age rule is introduced.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub boot_started_at: Option<u64>,
 }
 
 impl PatchEvent {
@@ -101,6 +156,35 @@ impl PatchEvent {
             release_version: config.release_version.clone(),
             timestamp: time::unix_timestamp(),
             message: message.map(|s| s.to_string()),
+            outcome: None,
+            ambiguous_attempt_count: None,
+            boot_failure_threshold: None,
+            boot_started_at: None,
+        }
+    }
+
+    /// Builds a non-terminal boot-lifecycle observation.
+    pub fn boot_lifecycle(
+        config: &UpdateConfig,
+        patch_number: usize,
+        client_id: String,
+        outcome: BootOutcome,
+        ambiguous_attempt_count: u32,
+        boot_failure_threshold: u32,
+        boot_started_at: Option<u64>,
+    ) -> PatchEvent {
+        PatchEvent {
+            outcome: Some(outcome),
+            ambiguous_attempt_count: Some(ambiguous_attempt_count),
+            boot_failure_threshold: Some(boot_failure_threshold),
+            boot_started_at,
+            ..PatchEvent::new(
+                config,
+                EventType::PatchBootLifecycle,
+                patch_number,
+                client_id,
+                None,
+            )
         }
     }
 }

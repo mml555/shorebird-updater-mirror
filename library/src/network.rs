@@ -370,6 +370,10 @@ mod tests {
             identifier: EventType::PatchInstallSuccess,
             timestamp: 1234,
             message: None,
+            outcome: None,
+            ambiguous_attempt_count: None,
+            boot_failure_threshold: None,
+            boot_started_at: None,
         };
         let request = super::CreatePatchEventRequest { event };
         let json_string = serde_json::to_string(&request).unwrap();
@@ -391,6 +395,10 @@ mod tests {
             identifier: EventType::PatchInstallSuccess,
             timestamp: 1234,
             message: Some("hello".to_string()),
+            outcome: None,
+            ambiguous_attempt_count: None,
+            boot_failure_threshold: None,
+            boot_started_at: None,
         };
         let request = super::CreatePatchEventRequest { event };
         let json_string = serde_json::to_string(&request).unwrap();
@@ -501,6 +509,10 @@ mod tests {
             identifier: EventType::PatchInstallSuccess,
             timestamp: time::unix_timestamp(),
             message: None,
+            outcome: None,
+            ambiguous_attempt_count: None,
+            boot_failure_threshold: None,
+            boot_started_at: None,
         };
         let result = super::report_event_default(
             // Make the request to a non-existent URL, which will trigger the
@@ -531,6 +543,10 @@ mod tests {
                     identifier: EventType::PatchInstallSuccess,
                     timestamp: time::unix_timestamp(),
                     message: None,
+                    outcome: None,
+                    ambiguous_attempt_count: None,
+                    boot_failure_threshold: None,
+                    boot_started_at: None,
                 },
             },
         );

@@ -13,10 +13,12 @@ use crate::file_errors::{FileOperation, IoResultExt};
 use anyhow::{bail, Context, Result};
 use dyn_clone::DynClone;
 
-use crate::cache::lifecycle::{self, BadReason, DownloadAction, SkipReason};
+use crate::cache::lifecycle::{
+    self, BadReason, BootRecovery, DownloadAction, SkipReason,
+};
 use crate::cache::{PatchInfo, UpdaterState};
 use crate::config::{set_config, with_config, UpdateConfig};
-use crate::events::{EventType, PatchEvent};
+use crate::events::{BootOutcome, EventType, PatchEvent};
 use crate::logging::init_logging;
 use crate::network::{download_to_path, patches_check_url, NetworkHooks, PatchCheckRequest};
 use crate::updater_lock::{with_updater_thread_lock, UpdaterLockState};
@@ -258,18 +260,65 @@ pub fn handle_prior_boot_failure_if_necessary() -> Result<(), InitError> {
             // would assert exactly what this branch refuses to assert. The
             // non-terminal lifecycle event is a separate, deliberate change —
             // see `selfhost/LIFECYCLE_POLICY.md`.
-            if let Some(retired) = state.detect_boot_crash_on_init()? {
-                let now = crate::time::unix_timestamp();
-                let message = format!(
-                    "crash_recovery: patch {retired} failed to boot (detected_at={now}{boot_time_info},{file_info})",
-                );
-                state.queue_event(PatchEvent::new(
-                    config,
-                    EventType::PatchInstallFailure,
-                    retired,
-                    state.client_id(),
-                    Some(&message),
-                ))?;
+            // EMITTED AT THE CLASSIFICATION POINT, both branches. Reporting only
+            // the terminal outcome is what made the threshold unjustifiable: the
+            // server heard about patches that were RETIRED and never about the
+            // ones that hit a single ambiguous boot and then recovered.
+            match state.detect_boot_crash_on_init()? {
+                BootRecovery::Idle => {}
+
+                // Non-terminal. NOT a PatchInstallFailure: this says the boot did
+                // not finish, not that the patch is at fault.
+                BootRecovery::Retried {
+                    patch,
+                    attempt,
+                    threshold,
+                    boot_started_at,
+                } => {
+                    let client_id = state.client_id();
+                    state.queue_event(PatchEvent::boot_lifecycle(
+                        config,
+                        patch,
+                        client_id,
+                        BootOutcome::AmbiguousBootRetry,
+                        attempt,
+                        threshold,
+                        boot_started_at,
+                    ))?;
+                }
+
+                // Terminal. Keeps the existing PatchInstallFailure so current
+                // metrics and alerting are unchanged, and adds the lifecycle
+                // observation so retirements and recoveries are countable in one
+                // population.
+                BootRecovery::Retired {
+                    patch,
+                    attempts,
+                    threshold,
+                    boot_started_at,
+                } => {
+                    let now = crate::time::unix_timestamp();
+                    let message = format!(
+                        "crash_recovery: patch {patch} failed to boot (detected_at={now}{boot_time_info},{file_info})",
+                    );
+                    let client_id = state.client_id();
+                    state.queue_event(PatchEvent::new(
+                        config,
+                        EventType::PatchInstallFailure,
+                        patch,
+                        client_id.clone(),
+                        Some(&message),
+                    ))?;
+                    state.queue_event(PatchEvent::boot_lifecycle(
+                        config,
+                        patch,
+                        client_id,
+                        BootOutcome::RetiredAfterAmbiguity,
+                        attempts,
+                        threshold,
+                        boot_started_at,
+                    ))?;
+                }
             }
         }
 
@@ -1183,7 +1232,28 @@ pub fn report_launch_success() -> anyhow::Result<()> {
         // Get the last successfully booted patch before we record the boot success.
         let maybe_previous_boot_patch = state.last_successfully_booted_patch();
 
-        state.record_boot_success()?;
+        let success = state.record_boot_success()?;
+
+        // RECOVERY, emitted only when there was ACTUAL preceding ambiguity.
+        //
+        // `prior_ambiguous_attempts` is captured inside `record_boot_success`
+        // from the live counter BEFORE the success clears it. It is deliberately
+        // NOT inferred from "a success happened and the counter is now zero" —
+        // that is true of every ordinary healthy boot, and would drop clean
+        // boots into the recovery population and destroy the meaning of
+        // P(recovery | first ambiguity).
+        if success.prior_ambiguous_attempts > 0 {
+            let client_id = state.client_id();
+            state.queue_event(PatchEvent::boot_lifecycle(
+                config,
+                success.patch,
+                client_id,
+                BootOutcome::RecoveredAfterAmbiguity,
+                success.prior_ambiguous_attempts,
+                lifecycle::BOOT_FAILURE_THRESHOLD,
+                None,
+            ))?;
+        }
 
         // Check whether last_successfully_booted_patch has changed. If so, we should report a
         // PatchInstallSuccess event.
@@ -1454,6 +1524,203 @@ mod tests {
         crate::with_mut_state(|state| Ok(state.next_boot_patch().map(|p| p.number))).unwrap()
     }
 
+    use crate::events::{BootOutcome, PatchEvent};
+
+    fn lifecycle_events() -> Vec<crate::events::PatchEvent> {
+        with_state(|state| {
+            Ok(state
+                .copy_events(50)
+                .into_iter()
+                .filter(|e| e.identifier == EventType::PatchBootLifecycle)
+                .collect())
+        })
+        .unwrap()
+    }
+
+    fn has_terminal_failure() -> bool {
+        with_state(|state| {
+            Ok(state
+                .copy_events(50)
+                .iter()
+                .any(|e| e.identifier == EventType::PatchInstallFailure))
+        })
+        .unwrap()
+    }
+
+    /// TELEMETRY C3: a first ambiguous boot reports a RETRY, and does NOT blame
+    /// the patch. The distinction is the entire reason this event exists.
+    #[serial]
+    #[test]
+    fn prod_telemetry_first_ambiguity_reports_retry_not_failure() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+
+        let events = lifecycle_events();
+        assert_eq!(events.len(), 1, "one lifecycle observation");
+        let e = &events[0];
+        assert_eq!(e.outcome, Some(BootOutcome::AmbiguousBootRetry));
+        assert_eq!(e.ambiguous_attempt_count, Some(1));
+        assert_eq!(e.patch_number, 1);
+        assert!(e.boot_started_at.is_some(), "boot age must be reported");
+        assert!(
+            !has_terminal_failure(),
+            "a first ambiguous death must NOT be reported as a patch failure"
+        );
+        Ok(())
+    }
+
+    /// TELEMETRY: a success after ambiguity reports RECOVERY, carrying the
+    /// ambiguity that preceded it, correlated by the existing envelope
+    /// (client_id + app_id + release_version + patch_number).
+    #[serial]
+    #[test]
+    fn prod_telemetry_success_after_ambiguity_reports_recovery() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+
+        crate::report_launch_start()?;
+        crate::report_launch_success()?;
+
+        let events = lifecycle_events();
+        let recovery = events
+            .iter()
+            .find(|e| e.outcome == Some(BootOutcome::RecoveredAfterAmbiguity))
+            .expect("a recovery must be reported");
+        assert_eq!(
+            recovery.ambiguous_attempt_count,
+            Some(1),
+            "the recovery must carry the ambiguity that preceded it"
+        );
+        // Correlation identity, all already in the envelope — no new id needed.
+        let retry = events
+            .iter()
+            .find(|e| e.outcome == Some(BootOutcome::AmbiguousBootRetry))
+            .unwrap();
+        assert_eq!(recovery.client_id, retry.client_id);
+        assert_eq!(recovery.app_id, retry.app_id);
+        assert_eq!(recovery.release_version, retry.release_version);
+        assert_eq!(recovery.patch_number, retry.patch_number);
+        Ok(())
+    }
+
+    /// THE GUARD: a clean boot must never enter the recovery population.
+    #[serial]
+    #[test]
+    fn prod_telemetry_a_clean_boot_reports_no_recovery() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
+        crate::report_launch_success()?;
+
+        assert!(
+            lifecycle_events().is_empty(),
+            "a healthy boot must emit no lifecycle observation at all — \
+             inferring recovery from 'success and the counter is zero' would \
+             put every clean boot into the recovery population"
+        );
+        Ok(())
+    }
+
+    /// TELEMETRY C4: the second consecutive ambiguity reports RETIREMENT, and
+    /// keeps the terminal failure event for compatibility.
+    #[serial]
+    #[test]
+    fn prod_telemetry_second_ambiguity_reports_retirement() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+        crate::report_launch_start()?;
+        init_for_testing(&tmp_dir, None);
+
+        let events = lifecycle_events();
+        let retired = events
+            .iter()
+            .find(|e| e.outcome == Some(BootOutcome::RetiredAfterAmbiguity))
+            .expect("retirement must be reported");
+        assert_eq!(retired.ambiguous_attempt_count, Some(2));
+        assert_eq!(retired.boot_failure_threshold, Some(2));
+        assert!(
+            has_terminal_failure(),
+            "the existing terminal event is preserved for compatibility"
+        );
+        Ok(())
+    }
+
+    /// TELEMETRY C2: an explicit failure stays immediate and is DISTINGUISHABLE
+    /// from inferred ambiguity — it emits no ambiguous-retry observation.
+    #[serial]
+    #[test]
+    fn prod_telemetry_explicit_failure_is_distinguishable() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        crate::report_launch_start()?;
+        crate::report_launch_failure()?;
+
+        assert!(has_terminal_failure(), "explicit failure is terminal at once");
+        assert!(
+            lifecycle_events()
+                .iter()
+                .all(|e| e.outcome != Some(BootOutcome::AmbiguousBootRetry)),
+            "an explicit failure is not ambiguity and must not be counted as it"
+        );
+        Ok(())
+    }
+
+    /// WIRE COMPATIBILITY: a non-lifecycle event must serialise byte-identically
+    /// to before these fields existed, or the server's dedupe key shifts and
+    /// every device re-reports once on upgrade.
+    #[serial]
+    #[test]
+    fn prod_telemetry_existing_events_serialise_unchanged() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+
+        with_config(|config| {
+            let e = PatchEvent::new(
+                config,
+                EventType::PatchInstallSuccess,
+                1,
+                "client".to_string(),
+                None,
+            );
+            let json = serde_json::to_string(&e).unwrap();
+            for field in [
+                "outcome",
+                "ambiguous_attempt_count",
+                "boot_failure_threshold",
+                "boot_started_at",
+            ] {
+                assert!(
+                    !json.contains(field),
+                    "{field} must be absent from non-lifecycle events: {json}"
+                );
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// C3: one unfinished boot must leave the patch eligible.
     #[serial]
     #[test]
@@ -1580,8 +1847,17 @@ mod tests {
         crate::report_launch_start()?;
         with_state(|state| {
             assert_eq!(state.currently_booting_patch().unwrap().number, 1);
-            // We should have no queued events
-            assert!(state.copy_events(1).is_empty());
+            // No TERMINAL event yet. There may already be non-terminal
+            // ambiguous-retry observations from the sub-threshold boots above,
+            // and that is the point of them — the server hears about ambiguity
+            // as it happens rather than only once a patch is retired.
+            assert!(
+                state
+                    .copy_events(10)
+                    .iter()
+                    .all(|e| e.identifier != EventType::PatchInstallFailure),
+                "no patch should be blamed before the threshold is reached"
+            );
             Ok(())
         })?;
 
@@ -1590,10 +1866,13 @@ mod tests {
 
         with_state(|state| {
             assert!(state.currently_booting_patch().is_none());
-            // We should now have a queued PatchInstallFailure event
-            let events = state.copy_events(1);
-            assert_eq!(events.len(), 1);
-            assert_eq!(events[0].identifier, EventType::PatchInstallFailure);
+            // We should now have a queued PatchInstallFailure event, alongside
+            // the non-terminal lifecycle observation.
+            let events = state.copy_events(10);
+            assert_eq!(
+                crate::updater::terminal_failure(&events).identifier,
+                EventType::PatchInstallFailure
+            );
             Ok(())
         })?;
 
@@ -2261,6 +2540,10 @@ patch_verification: bogus_mode
                 release_version: config.release_version.clone(),
                 timestamp: time::unix_timestamp(),
                 message: Some("engine_report: patch 1 failed to launch".to_string()),
+                outcome: None,
+                ambiguous_attempt_count: None,
+                boot_failure_threshold: None,
+                boot_started_at: None,
             };
             // Queue 5 events.
             assert!(state.queue_event(fail_event.clone()).is_ok());
@@ -3286,13 +3569,9 @@ mod state_recovery_tests {
 
         with_state(|state| {
             let events = state.copy_events(10);
-            assert_eq!(events.len(), 1);
-            assert_eq!(
-                events[0].identifier,
-                crate::events::EventType::PatchInstallFailure
-            );
-            assert_eq!(events[0].patch_number, 1);
-            let message = events[0].message.as_ref().unwrap();
+            let failure = crate::updater::terminal_failure(&events);
+            assert_eq!(failure.patch_number, 1);
+            let message = failure.message.as_ref().unwrap();
             assert!(
                 message.starts_with("crash_recovery: patch 1 failed to boot"),
                 "unexpected message: {message}"
@@ -3336,8 +3615,10 @@ mod state_recovery_tests {
 
         with_state(|state| {
             let events = state.copy_events(10);
-            assert_eq!(events.len(), 1);
-            let message = events[0].message.as_ref().unwrap();
+            let message = crate::updater::terminal_failure(&events)
+                .message
+                .as_ref()
+                .unwrap();
             assert!(
                 message.contains("file_ok=false,file_missing"),
                 "expected file_missing in message: {message}"
@@ -3373,8 +3654,10 @@ mod state_recovery_tests {
 
         with_state(|state| {
             let events = state.copy_events(10);
-            assert_eq!(events.len(), 1);
-            let message = events[0].message.as_ref().unwrap();
+            let message = crate::updater::terminal_failure(&events)
+                .message
+                .as_ref()
+                .unwrap();
             assert!(
                 !message.contains("boot_started_at"),
                 "expected boot_started_at to be omitted from message: {message}"
@@ -4422,4 +4705,16 @@ mod patch_check_current_patch_number_tests {
         assert_eq!(CAPTURED.load(Ordering::SeqCst), 1);
         Ok(())
     }
+}
+
+/// The terminal failure event from a queue that now also carries a non-terminal
+/// boot-lifecycle observation. Selecting BY TYPE rather than asserting a count
+/// keeps these tests about what they are about; a bare `len() == 1` would break
+/// every time an unrelated observation is added.
+#[cfg(test)]
+fn terminal_failure(events: &[crate::events::PatchEvent]) -> &crate::events::PatchEvent {
+    events
+        .iter()
+        .find(|e| e.identifier == crate::events::EventType::PatchInstallFailure)
+        .expect("expected a PatchInstallFailure event")
 }

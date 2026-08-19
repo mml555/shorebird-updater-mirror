@@ -186,6 +186,44 @@ pub struct ReleasePointers {
 /// extra crash in the genuine-failure case.
 pub const BOOT_FAILURE_THRESHOLD: u32 = 2;
 
+/// What init-time recovery did. Returned so telemetry is emitted at the
+/// CLASSIFICATION POINT rather than inferred downstream from retirement — the
+/// observability defect this whole lane exists to fix was exactly that the
+/// server only ever heard about terminal outcomes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BootRecovery {
+    /// No boot was in flight; nothing to classify.
+    Idle,
+    /// A boot did not finish, and the tally is below the threshold: AMBIGUOUS,
+    /// so the patch is retried. Not evidence against the patch.
+    Retried {
+        patch: usize,
+        attempt: u32,
+        threshold: u32,
+        boot_started_at: Option<u64>,
+    },
+    /// A boot did not finish and the tally reached the threshold: retired.
+    Retired {
+        patch: usize,
+        attempts: u32,
+        threshold: u32,
+        boot_started_at: Option<u64>,
+    },
+}
+
+/// The outcome of a successful boot, carrying how much ambiguity PRECEDED it.
+///
+/// `prior_ambiguous_attempts` is computed from the live counter BEFORE the
+/// success clears it. It must never be inferred from "success happened and the
+/// counter is now zero" — that is true of every ordinary healthy boot, and
+/// would put clean boots into the recovery population and corrupt
+/// P(recovery | first ambiguity).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BootSuccess {
+    pub patch: usize,
+    pub prior_ambiguous_attempts: u32,
+}
+
 /// Per-release patch lifecycle and storage. Owns
 /// `{state_root}/patches/`, `{state_root}/pointers.json`, and
 /// `{download_root}/{N}` files for in-flight compressed downloads.
@@ -612,11 +650,16 @@ impl PatchLifecycle {
     /// Records a successful boot. Promotes `currently_booting_patch` to
     /// `last_booted_patch` and runs cleanup on older patches (per-patch
     /// state-aware: Bad tombstones survive, others are forgotten).
-    pub fn record_boot_success(&mut self) -> Result<()> {
+    pub fn record_boot_success(&mut self) -> Result<BootSuccess> {
         let n = self
             .pointers
             .currently_booting_patch
             .context("record_boot_success without currently_booting_patch")?;
+        // CAPTURED BEFORE THE RESET. `record_boot_start` counted THIS boot too,
+        // so the ambiguity that preceded it is the tally minus the current
+        // attempt. A patch that boots cleanly first try yields 0 and is
+        // therefore not a recovery.
+        let prior_ambiguous_attempts = self.pointers.boot_attempt_count.saturating_sub(1);
         self.pointers.last_booted_patch = Some(n);
         self.pointers.currently_booting_patch = None;
         self.pointers.boot_started_at = None;
@@ -626,7 +669,10 @@ impl PatchLifecycle {
         self.pointers.last_boot_attempt_patch = None;
         self.save_pointers()?;
         self.cleanup_older_than(n);
-        Ok(())
+        Ok(BootSuccess {
+            patch: n,
+            prior_ambiguous_attempts,
+        })
     }
 
     /// Records that patch `n` failed to boot. Marks the patch
@@ -663,10 +709,12 @@ impl PatchLifecycle {
     /// failure — transition the patch to `Bad{BootCrash}` and recompute
     /// `next_boot_patch`. Returns the patch number that was recovered,
     /// if any.
-    pub fn detect_boot_crash_on_init(&mut self) -> Result<Option<usize>> {
+    pub fn detect_boot_crash_on_init(&mut self) -> Result<BootRecovery> {
         let Some(n) = self.pointers.currently_booting_patch else {
-            return Ok(None);
+            return Ok(BootRecovery::Idle);
         };
+        let boot_started_at = self.pointers.boot_started_at;
+        let threshold = self.boot_failure_threshold;
 
         // G15: DO NOT conclude from a single un-succeeded boot. The breadcrumb
         // tells us this boot did not record success; it does not tell us why,
@@ -688,14 +736,26 @@ impl PatchLifecycle {
             // memory that makes the next boot's decision possible, and zeroing
             // them here would make the threshold unreachable and restore the
             // old single-strike behaviour by accident.
+            let attempt = self.pointers.boot_attempt_count;
             self.pointers.currently_booting_patch = None;
             self.pointers.boot_started_at = None;
             self.save_pointers()?;
-            return Ok(None);
+            return Ok(BootRecovery::Retried {
+                patch: n,
+                attempt,
+                threshold,
+                boot_started_at,
+            });
         }
 
+        let attempts = self.pointers.boot_attempt_count;
         self.record_boot_failure(n)?;
-        Ok(Some(n))
+        Ok(BootRecovery::Retired {
+            patch: n,
+            attempts,
+            threshold,
+            boot_started_at,
+        })
     }
 
     /// Validates that `next_boot_patch` is bootable (its on-disk size
@@ -1884,7 +1944,10 @@ mod tests {
         // now retried, and the tally is what survives to decide next time.
         let mut lifecycle = reload_at(tmp.path());
         let recovered = lifecycle.detect_boot_crash_on_init().unwrap();
-        assert_eq!(recovered, None, "one un-succeeded boot must not tombstone");
+        assert!(
+            matches!(recovered, BootRecovery::Retried { .. }),
+            "one un-succeeded boot must not tombstone"
+        );
         assert!(matches!(
             lifecycle.read_state(1),
             Some(PatchState::Installed { .. })
@@ -1913,7 +1976,10 @@ mod tests {
         }
         let mut lifecycle = reload_at(tmp.path());
         let recovered = lifecycle.detect_boot_crash_on_init().unwrap();
-        assert_eq!(recovered, Some(1), "a patch that fails every boot is bad");
+        assert!(
+            matches!(recovered, BootRecovery::Retired { patch: 1, .. }),
+            "a patch that fails every boot is bad"
+        );
         assert!(matches!(
             lifecycle.read_state(1),
             Some(PatchState::Bad { .. })
@@ -1945,7 +2011,10 @@ mod tests {
             let mut lifecycle = reload_at(tmp.path());
             lifecycle.record_boot_start(1).unwrap();
             let mut next = reload_at(tmp.path());
-            assert_eq!(next.detect_boot_crash_on_init().unwrap(), None);
+            assert!(matches!(
+                next.detect_boot_crash_on_init().unwrap(),
+                BootRecovery::Retried { .. }
+            ));
             assert!(matches!(
                 next.read_state(1),
                 Some(PatchState::Installed { .. })
@@ -1977,7 +2046,10 @@ mod tests {
     #[test]
     fn detect_boot_crash_on_init_is_noop_when_no_breadcrumb() {
         let (_tmp, mut lifecycle) = fixture();
-        assert_eq!(lifecycle.detect_boot_crash_on_init().unwrap(), None);
+        assert_eq!(
+            lifecycle.detect_boot_crash_on_init().unwrap(),
+            BootRecovery::Idle
+        );
     }
 
     #[test]
