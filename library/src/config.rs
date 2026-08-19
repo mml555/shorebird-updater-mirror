@@ -22,6 +22,31 @@ const DEFAULT_BASE_URL: &str = "https://api.shorebird.dev";
 /// cbindgen:ignore
 const DEFAULT_CHANNEL: &str = "stable";
 
+
+/// Locks a global, recovering from poisoning **in test builds only**.
+///
+/// In production a poisoned lock means a thread panicked mid-mutation, and
+/// propagating that is correct — the config may be half-written.
+///
+/// In tests it is actively harmful. One panicking test poisons the mutex for the
+/// whole process, so every later test fails with `PoisonError` regardless of its
+/// own correctness. That is not a cascade of failures, it is a cascade of
+/// NOISE: on 2026-08-19 it turned ONE real failure into 48 and hid which one was
+/// real. Each test reinitialises the config it depends on anyway, so inherited
+/// contents are irrelevant — only the ability to take the lock matters.
+macro_rules! lock_global {
+    ($m:expr, $what:literal) => {{
+        #[cfg(any(test, feature = "test-hooks"))]
+        {
+            $m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+        #[cfg(not(any(test, feature = "test-hooks")))]
+        {
+            $m.lock().expect($what)
+        }
+    }};
+}
+
 fn global_config() -> &'static Mutex<Option<UpdateConfig>> {
     static INSTANCE: Mutex<Option<UpdateConfig>> = Mutex::new(None);
     &INSTANCE
@@ -43,15 +68,11 @@ fn global_running_patch() -> &'static Mutex<Option<usize>> {
 }
 
 pub fn running_patch_number() -> Option<usize> {
-    *global_running_patch()
-        .lock()
-        .expect("Failed to acquire running_patch lock.")
+    *lock_global!(global_running_patch(), "Failed to acquire running_patch lock.")
 }
 
 pub fn set_running_patch_number(patch_number: Option<usize>) {
-    *global_running_patch()
-        .lock()
-        .expect("Failed to acquire running_patch lock.") = patch_number;
+    *lock_global!(global_running_patch(), "Failed to acquire running_patch lock.") = patch_number;
 }
 
 /// Unit tests should call this to reset the config between tests.
@@ -89,9 +110,7 @@ where
 {
     // expect() here should be OK, it's job is to propagate a panic across
     // threads if the lock is poisoned.
-    let lock = global_config()
-        .lock()
-        .expect("Failed to acquire updater lock.");
+    let lock = lock_global!(global_config(), "Failed to acquire updater lock.");
     check_initialized_and_call(f, &lock)
 }
 
@@ -99,9 +118,7 @@ pub fn with_config_mut<F, R>(f: F) -> R
 where
     F: FnOnce(&mut Option<UpdateConfig>) -> R,
 {
-    let mut lock = global_config()
-        .lock()
-        .expect("Failed to acquire updater lock.");
+    let mut lock = lock_global!(global_config(), "Failed to acquire updater lock.");
     f(&mut lock)
 }
 
