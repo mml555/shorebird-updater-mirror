@@ -1234,6 +1234,19 @@ pub fn report_launch_success() -> anyhow::Result<()> {
 
         let success = state.record_boot_success()?;
 
+        // MEASUREMENT FIDELITY. The recovery event is the numerator of
+        // P(recovery | first ambiguity), so when it is NOT emitted we must be able
+        // to tell "there was no ambiguity" from "the tally was wrong". Logging the
+        // decisive number makes the next device run decisive instead of inferential:
+        // a 2026-08-20 run recovered a patch on device and emitted no recovery, and
+        // the count at that moment could not be recovered from any artifact.
+        shorebird_info!(
+            "Launch success for patch {}: prior_ambiguous_attempts={} (recovery event {})",
+            success.patch,
+            success.prior_ambiguous_attempts,
+            if success.prior_ambiguous_attempts > 0 { "WILL be emitted" } else { "suppressed: no prior ambiguity" }
+        );
+
         // RECOVERY, emitted only when there was ACTUAL preceding ambiguity.
         //
         // `prior_ambiguous_attempts` is captured inside `record_boot_success`
@@ -1545,6 +1558,61 @@ mod tests {
                 .any(|e| e.identifier == EventType::PatchInstallFailure))
         })
         .unwrap()
+    }
+
+    /// DIAGNOSTIC: prints boot_attempt_count at the five points that decide
+    /// whether a recovery is reported, across a simulated process boundary.
+    ///
+    /// Exists because the DEVICE recovered a patch (Installed, last_booted set,
+    /// tally cleared) and yet emitted no `recovered_after_ambiguity`, while
+    /// `prod_telemetry_success_after_ambiguity_reports_recovery` passes. One of
+    /// them models production and the other does not.
+    #[serial]
+    #[test]
+    fn diag_tally_across_process_boundary() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+
+        fn tally(tag: &str) {
+            let (c, la) = with_state(|s| {
+                let p = s.lifecycle().pointers();
+                Ok((p.boot_attempt_count, p.last_boot_attempt_patch))
+            })
+            .unwrap();
+            eprintln!("DIAG {tag:38} count={c} last_attempt={la:?}");
+        }
+
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+        tally("[0] after install");
+
+        // ---- PROCESS A: boot starts, then the process vanishes ----
+        crate::report_launch_start()?;
+        tally("[1] A: after report_launch_start");
+
+        // ---- PROCESS B: fresh load from the same disk ----
+        init_for_testing(&tmp_dir, None);
+        tally("[2+3] B: after init (crash detection ran)");
+
+        crate::report_launch_start()?;
+        tally("[4] B: immediately before success");
+
+        let prior = with_state(|s| Ok(s.lifecycle().pointers().boot_attempt_count)).unwrap();
+        eprintln!("DIAG [5] count at success={prior} -> prior_ambiguous = {}", prior.saturating_sub(1));
+
+        crate::report_launch_success()?;
+        tally("[6] B: after success");
+
+        let lifecycle: Vec<_> = with_state(|s| {
+            Ok(s.copy_events(50)
+                .into_iter()
+                .filter(|e| e.identifier == EventType::PatchBootLifecycle)
+                .map(|e| format!("{:?}/{:?}", e.outcome, e.ambiguous_attempt_count))
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+        eprintln!("DIAG lifecycle events emitted: {lifecycle:?}");
+        Ok(())
     }
 
     /// TELEMETRY C3: a first ambiguous boot reports a RETRY, and does NOT blame
