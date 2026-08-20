@@ -222,6 +222,12 @@ pub enum BootRecovery {
 pub struct BootSuccess {
     pub patch: usize,
     pub prior_ambiguous_attempts: u32,
+    /// The RAW tally observed at success, before it was cleared.
+    ///
+    /// Observation only — nothing branches on it. Recorded independently rather
+    /// than derived as `prior + 1`, because the point of measuring it is to catch a
+    /// `prior` that was computed wrongly, and a derivation would hide exactly that.
+    pub raw_boot_attempt_count: u32,
 }
 
 /// Per-release patch lifecycle and storage. Owns
@@ -659,7 +665,8 @@ impl PatchLifecycle {
         // so the ambiguity that preceded it is the tally minus the current
         // attempt. A patch that boots cleanly first try yields 0 and is
         // therefore not a recovery.
-        let prior_ambiguous_attempts = self.pointers.boot_attempt_count.saturating_sub(1);
+        let raw_boot_attempt_count = self.pointers.boot_attempt_count;
+        let prior_ambiguous_attempts = raw_boot_attempt_count.saturating_sub(1);
         self.pointers.last_booted_patch = Some(n);
         self.pointers.currently_booting_patch = None;
         self.pointers.boot_started_at = None;
@@ -672,6 +679,7 @@ impl PatchLifecycle {
         Ok(BootSuccess {
             patch: n,
             prior_ambiguous_attempts,
+            raw_boot_attempt_count,
         })
     }
 

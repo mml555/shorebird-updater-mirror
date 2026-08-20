@@ -1234,6 +1234,36 @@ pub fn report_launch_success() -> anyhow::Result<()> {
 
         let success = state.record_boot_success()?;
 
+        // DURABLE WITNESS, for the observation build.
+        //
+        // The syslog line below is not sufficient on its own: the 2026-08-20 device
+        // run produced a 191MB live capture in which row 5's success report is
+        // absent, and line loss cannot be excluded. Absence from syslog must not be
+        // confusable with absence of execution, so the same facts are appended to a
+        // file inside the updater's own state dir, which `afcclient` can read after
+        // the fact.
+        //
+        // Best-effort and deliberately unwrapped: a diagnostic must never be able
+        // to fail a launch. Appended, never truncated, so a rerun cannot erase the
+        // previous run's record.
+        {
+            use std::io::Write as _;
+            let path = config.storage_dir.join("success_diag.log");
+            let line = format!(
+                "pid={} patch={} raw_boot_attempt={} prior_ambiguous_attempts={} recovery_event_decision={}\n",
+                std::process::id(),
+                success.patch,
+                success.raw_boot_attempt_count,
+                success.prior_ambiguous_attempts,
+                if success.prior_ambiguous_attempts > 0 { "WILL_EMIT" } else { "SUPPRESSED" },
+            );
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut f| f.write_all(line.as_bytes()));
+        }
+
         // MEASUREMENT FIDELITY. The recovery event is the numerator of
         // P(recovery | first ambiguity), so when it is NOT emitted we must be able
         // to tell "there was no ambiguity" from "the tally was wrong". Logging the
@@ -1558,6 +1588,52 @@ mod tests {
                 .any(|e| e.identifier == EventType::PatchInstallFailure))
         })
         .unwrap()
+    }
+
+    /// The durable witness must actually be written, and must record the RAW
+    /// tally. An unverified diagnostic is worth nothing — if the next device run
+    /// finds no file, that must mean the seam did not execute, not that the writer
+    /// was broken.
+    #[serial]
+    #[test]
+    fn success_diag_record_is_written_and_distinguishes_the_two_cases() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        let diag = tmp_dir.path().join("success_diag.log");
+
+        // --- clean boot: must record SUPPRESSED with raw count 1 ---
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+        crate::report_launch_start()?;
+        crate::report_launch_success()?;
+        let after_clean = std::fs::read_to_string(&diag).unwrap_or_default();
+        assert!(
+            after_clean.contains("raw_boot_attempt=1")
+                && after_clean.contains("prior_ambiguous_attempts=0")
+                && after_clean.contains("recovery_event_decision=SUPPRESSED"),
+            "clean boot record wrong: {after_clean}"
+        );
+
+        // --- recovery: ambiguous death, then success ---
+        crate::report_launch_start()?;               // boot 2 begins
+        init_for_testing(&tmp_dir, None);            // process boundary: classified ambiguous
+        crate::report_launch_start()?;
+        crate::report_launch_success()?;
+        let after_recovery = std::fs::read_to_string(&diag).unwrap_or_default();
+        assert!(
+            after_recovery.contains("raw_boot_attempt=2")
+                && after_recovery.contains("prior_ambiguous_attempts=1")
+                && after_recovery.contains("recovery_event_decision=WILL_EMIT"),
+            "recovery record wrong: {after_recovery}"
+        );
+
+        // Appended, never truncated — a rerun must not erase the prior run.
+        assert_eq!(
+            after_recovery.lines().count(),
+            2,
+            "expected both records retained: {after_recovery}"
+        );
+        Ok(())
     }
 
     /// DIAGNOSTIC: prints boot_attempt_count at the five points that decide
