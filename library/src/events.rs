@@ -74,7 +74,9 @@ impl<'de> Deserialize<'de> for EventType {
 /// with our privacy policy:
 /// <https://docs.shorebird.dev/privacy>
 /// An event that is sent to the server when a patch is successfully installed.
-#[derive(Debug, Serialize, Deserialize, Clone)]
+// PartialEq so a flusher can remove the EXACT event it sent, rather than clearing
+// the whole queue and destroying anything enqueued meanwhile.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct PatchEvent {
     /// The Shorebird app_id built into the shorebird.yaml in the app.
     pub app_id: String,

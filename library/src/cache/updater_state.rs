@@ -545,6 +545,54 @@ impl UpdaterState {
         self.serialized_state.queued_events.clear();
         self.save()
     }
+
+    /// Removes ONE queued entry equal to `event`, then persists.
+    ///
+    /// THE INVARIANT THIS EXISTS TO ENFORCE:
+    ///
+    ///   a queued event may disappear from durable state only when THAT EXACT
+    ///   event has been successfully handed off.
+    ///
+    /// `clear_events` cannot honour that: it wipes the whole queue, so anything
+    /// enqueued between a flusher's read and its clear is destroyed unsent. That
+    /// silently deleted `recovered_after_ambiguity` on device — the numerator of
+    /// P(recovery | first ambiguity) — because it is queued at launch success,
+    /// squarely inside that window, while the denominator is queued earlier at init
+    /// and survives. See evidence/g15/lost_update_verdict.md.
+    ///
+    /// Removes only the FIRST match, so N genuinely duplicate entries require N
+    /// acknowledgements. Identity is full-field equality on the event itself: no
+    /// local queue id is introduced, because the wire fields already distinguish
+    /// every event this client emits, and index-based deletion would be wrong the
+    /// moment the queue is mutated concurrently.
+    ///
+    /// Returns whether an entry was found and removed.
+    pub fn acknowledge_sent_event(&mut self, event: &PatchEvent) -> Result<bool> {
+        let before = self.serialized_state.queued_events.len();
+        if let Some(idx) = self
+            .serialized_state
+            .queued_events
+            .iter()
+            .position(|queued| queued == event)
+        {
+            self.serialized_state.queued_events.remove(idx);
+        }
+        let removed = self.serialized_state.queued_events.len() != before;
+        state_diag(
+            &self.cache_dir,
+            &format!(
+                "ACK_EVENT instance={} event={:?}/{:?} removed={} queue_len={}->{}",
+                self.instance_id,
+                event.identifier,
+                event.outcome,
+                removed,
+                before,
+                self.serialized_state.queued_events.len(),
+            ),
+        );
+        self.save()?;
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]
