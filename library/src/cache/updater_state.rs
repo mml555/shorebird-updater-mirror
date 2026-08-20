@@ -525,15 +525,44 @@ impl UpdaterState {
 
     /// Removes the first queued event equal to `event`, once the server has
     /// it. Does nothing if it's no longer queued (dropped for space).
+    ///
+    /// THE INVARIANT: a queued event may disappear from durable state only when
+    /// THAT EXACT event has been successfully handed off. Upstream's flusher
+    /// removes exactly what it sent through this method, so it already holds;
+    /// the fork's `acknowledge_sent_event` is now a test-only wrapper. Identity
+    /// is full-field equality, so N genuinely duplicate entries need N removals.
     pub fn remove_event(&mut self, event: &PatchEvent) -> Result<()> {
+        let before = self.serialized_state.queued_events.len();
         let events = &mut self.serialized_state.queued_events;
-        match events.iter().position(|queued| queued == event) {
+        let result = match events.iter().position(|queued| queued == event) {
             Some(index) => {
                 events.remove(index);
                 self.save()
             }
             None => Ok(()),
-        }
+        };
+        state_diag(
+            &self.cache_dir,
+            &format!(
+                "ACK_EVENT instance={} event={:?}/{:?} removed={} queue_len={}->{}",
+                self.instance_id,
+                event.identifier,
+                event.outcome,
+                self.serialized_state.queued_events.len() != before,
+                before,
+                self.serialized_state.queued_events.len(),
+            ),
+        );
+        result
+    }
+
+    /// The fork's name for [`Self::remove_event`], returning whether an entry
+    /// was found and removed. Kept so the fork's regression tests port as-is.
+    #[cfg(test)]
+    pub fn acknowledge_sent_event(&mut self, event: &PatchEvent) -> Result<bool> {
+        let before = self.serialized_state.queued_events.len();
+        self.remove_event(event)?;
+        Ok(self.serialized_state.queued_events.len() != before)
     }
 }
 

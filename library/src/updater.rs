@@ -2041,6 +2041,137 @@ mod tests {
         .unwrap()
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // QUEUE ACKNOWLEDGEMENT — the invariant is that an event disappears from
+    // durable state only once THAT EXACT event was handed off. These are
+    // behavioural: they drive queue_event / acknowledge_sent_event directly, and
+    // each fails against the old clear_events() semantics.
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// Clones the config OUT of the lock. `with_state`/`with_mut_state` take the
+    /// same non-reentrant lock `with_config` holds, so calling them inside a
+    /// `with_config` closure deadlocks.
+    fn cfg_clone() -> crate::config::UpdateConfig {
+        with_config(|c| Ok(c.clone())).unwrap()
+    }
+
+    fn ev(config: &crate::config::UpdateConfig, n: usize) -> PatchEvent {
+        PatchEvent::new(
+            config,
+            EventType::PatchInstallSuccess,
+            n,
+            "client".to_string(),
+            Some(&format!("event-{n}")),
+        )
+    }
+
+    /// 1. Concurrent enqueue during flush: an event queued AFTER the batch was
+    ///    copied must survive acknowledgement of that batch.
+    #[serial]
+    #[test]
+    fn ack_preserves_events_queued_after_the_batch_was_copied() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        {
+            let config = &cfg_clone();
+            let a = ev(config, 1);
+            let b = ev(config, 2);
+            crate::with_mut_state(|s| s.queue_event(a.clone()))?;
+            let batch = with_state(|s| Ok(s.copy_events(3)))?;   // copies A only
+            assert_eq!(batch.len(), 1);
+            crate::with_mut_state(|s| s.queue_event(b.clone()))?; // B arrives mid-flush
+            for e in &batch {
+                assert!(crate::with_mut_state(|s| s.acknowledge_sent_event(e))?);
+            }
+            let left = with_state(|s| Ok(s.copy_events(10)))?;
+            assert_eq!(left.len(), 1, "B must survive");
+            assert_eq!(left[0], b, "the survivor must be B, not A");
+        }
+        Ok(())
+    }
+
+    /// 2. Three-item cap: A B C sent and acknowledged, D untouched.
+    #[serial]
+    #[test]
+    fn ack_respects_the_batch_cap_and_leaves_the_remainder() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        {
+            let config = &cfg_clone();
+            let all: Vec<_> = (1..=4).map(|n| ev(config, n)).collect();
+            for e in &all {
+                crate::with_mut_state(|s| s.queue_event(e.clone()))?;
+            }
+            let batch = with_state(|s| Ok(s.copy_events(3)))?;
+            assert_eq!(batch.len(), 3);
+            for e in &batch {
+                crate::with_mut_state(|s| s.acknowledge_sent_event(e))?;
+            }
+            let left = with_state(|s| Ok(s.copy_events(10)))?;
+            assert_eq!(left.len(), 1);
+            assert_eq!(left[0], all[3], "only D should remain");
+        }
+        Ok(())
+    }
+
+    /// 3. Partial failure: only the SENT one is removed. Pins the deliberate
+    ///    semantic change — a failed event is retried, not discarded.
+    #[serial]
+    #[test]
+    fn ack_leaves_unsent_events_queued_on_partial_failure() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        {
+            let config = &cfg_clone();
+            let (a, b, c) = (ev(config, 1), ev(config, 2), ev(config, 3));
+            for e in [&a, &b, &c] {
+                crate::with_mut_state(|s| s.queue_event(e.clone()))?;
+            }
+            // A "succeeds", B "fails" (never acknowledged), C not reached.
+            assert!(crate::with_mut_state(|s| s.acknowledge_sent_event(&a))?);
+            let left = with_state(|s| Ok(s.copy_events(10)))?;
+            assert_eq!(left, vec![b, c], "B and C must both remain, in order");
+        }
+        Ok(())
+    }
+
+    /// 4. THE ACTUAL DEVICE BUG: the retry is copied, the recovery is queued
+    ///    mid-flush, the retry is sent — and the recovery must survive to be
+    ///    emitted later.
+    #[serial]
+    #[test]
+    fn ack_preserves_a_recovery_queued_while_the_retry_was_in_flight() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        {
+            let config = &cfg_clone();
+            let retry = PatchEvent::boot_lifecycle(
+                config, 1, "c".to_string(), BootOutcome::AmbiguousBootRetry, 1, 2, Some(9),
+            );
+            let recovery = PatchEvent::boot_lifecycle(
+                config, 1, "c".to_string(), BootOutcome::RecoveredAfterAmbiguity, 1, 2, None,
+            );
+            crate::with_mut_state(|s| s.queue_event(retry.clone()))?;
+            let batch = with_state(|s| Ok(s.copy_events(3)))?;      // retry only
+            crate::with_mut_state(|s| s.queue_event(recovery.clone()))?;
+            for e in &batch {
+                crate::with_mut_state(|s| s.acknowledge_sent_event(e))?;
+            }
+            let left = with_state(|s| Ok(s.copy_events(10)))?;
+            assert_eq!(left.len(), 1, "the recovery must not be destroyed");
+            assert_eq!(
+                left[0].outcome,
+                Some(BootOutcome::RecoveredAfterAmbiguity),
+                "the survivor must be the recovery"
+            );
+        }
+        Ok(())
+    }
+
     /// The state-diagnostic must record a LOST UPDATE in a mechanically
     /// recognisable shape. Constructed here deliberately: if the trace cannot
     /// express the defect we are hunting, an absence of it on device proves
