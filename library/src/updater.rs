@@ -1590,6 +1590,77 @@ mod tests {
         .unwrap()
     }
 
+    /// The state-diagnostic must record a LOST UPDATE in a mechanically
+    /// recognisable shape. Constructed here deliberately: if the trace cannot
+    /// express the defect we are hunting, an absence of it on device proves
+    /// nothing.
+    #[serial]
+    #[test]
+    fn state_diag_records_a_lost_update_between_instances() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        install_fake_patch(1)?;
+
+        let diag = tmp_dir.path().join("state_diag.log");
+        std::fs::write(&diag, "")?;
+
+        with_config(|config| {
+            let load = || {
+                crate::cache::UpdaterState::load_or_new_on_error(
+                    &config.storage_dir,
+                    &config.download_dir,
+                    &config.release_version,
+                    config.patch_public_key.as_deref(),
+                    config.patch_verification,
+                )
+            };
+            // A and B both load BEFORE either mutates — the precondition for a
+            // lost update.
+            let mut a = load();
+            let b = load();
+
+            a.queue_event(PatchEvent::new(
+                config,
+                EventType::PatchBootLifecycle,
+                1,
+                "c".to_string(),
+                None,
+            ))?;
+            // B saves last, from a snapshot taken before A's event existed.
+            b.save()?;
+            Ok(())
+        })?;
+
+        let t = std::fs::read_to_string(&diag)?;
+        let ids: Vec<&str> = t.lines().filter(|l| l.contains("LOAD ")).collect();
+        assert!(ids.len() >= 2, "expected two LOADs:\n{t}");
+        assert!(t.contains("QUEUE_EVENT"), "no QUEUE_EVENT recorded:\n{t}");
+        assert!(
+            t.matches("SAVE_END").count() >= 2,
+            "expected A's and B's saves:\n{t}"
+        );
+        // The signature of the defect: the LAST save wrote a SHORTER queue than a
+        // preceding one.
+        let lens: Vec<usize> = t
+            .lines()
+            .filter(|l| l.contains("SAVE_END"))
+            .filter_map(|l| {
+                l.split("queue_len=")
+                    .nth(1)?
+                    .split_whitespace()
+                    .next()?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        assert!(
+            lens.windows(2).any(|w| w[1] < w[0]),
+            "no shrinking save recorded, so a lost update would be invisible: {lens:?}\n{t}"
+        );
+        Ok(())
+    }
+
     /// The durable witness must actually be written, and must record the RAW
     /// tally. An unverified diagnostic is worth nothing — if the next device run
     /// finds no file, that must mean the seam did not execute, not that the writer
