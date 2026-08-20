@@ -57,6 +57,52 @@ pub struct UpdaterState {
     patch_public_key: Option<String>,
     verification_mode: PatchVerificationMode,
     serialized_state: SerializedState,
+    /// Diagnostic-only identity for this in-memory instance. Nothing branches on
+    /// it. Exists to make a LOST UPDATE between two concurrent instances
+    /// mechanically recognisable rather than inferred: an event queued and saved
+    /// by instance A can be silently discarded by a later whole-file save from
+    /// instance B, which loaded before that event existed.
+    instance_id: u64,
+}
+
+/// Diagnostic-only instance counter.
+static NEXT_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_instance_id() -> u64 {
+    NEXT_INSTANCE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Cheap fingerprint of what is in memory / about to be written, so two saves can
+/// be told apart without dumping whole files.
+fn state_fingerprint(st: &SerializedState) -> String {
+    use std::hash::{Hash, Hasher};
+    let json = serde_json::to_string(st).unwrap_or_default();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    json.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// Appends one diagnostic line.
+///
+/// DELIBERATELY OUTSIDE the persistence mechanism under investigation: its own
+/// file, opened and closed per line, append-only, and taking NO lock that state
+/// operations take. Adding shared synchronisation here could serialise the very
+/// race being measured and make the defect vanish.
+fn state_diag(cache_dir: &Path, line: &str) {
+    use std::io::Write as _;
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cache_dir.join("state_diag.log"))
+        .and_then(|mut f| {
+            writeln!(
+                f,
+                "pid={} tid={:?} {}",
+                std::process::id(),
+                std::thread::current().id(),
+                line
+            )
+        });
 }
 
 /// UpdaterState fields that are serialized to disk at `{cache}/state.json`.
@@ -129,6 +175,7 @@ impl UpdaterState {
             cache_dir,
             patch_public_key: patch_public_key.map(|s| s.to_owned()),
             verification_mode,
+            instance_id: next_instance_id(),
             serialized_state: SerializedState {
                 client_id,
                 release_version,
@@ -144,7 +191,19 @@ impl UpdaterState {
         verification_mode: PatchVerificationMode,
     ) -> Result<Self> {
         let path = cache_dir.join(STATE_FILE_NAME);
-        let serialized_state = disk_io::read(&path)?;
+        // Annotated because the value is now read (for the LOAD diagnostic) before
+        // the struct literal that used to pin its type.
+        let serialized_state: SerializedState = disk_io::read(&path)?;
+        let instance_id = next_instance_id();
+        state_diag(
+            cache_dir,
+            &format!(
+                "LOAD instance={} queue_len={} fingerprint={}",
+                instance_id,
+                serialized_state.queued_events.len(),
+                state_fingerprint(&serialized_state),
+            ),
+        );
         Ok(Self {
             cache_dir: cache_dir.to_path_buf(),
             lifecycle: PatchLifecycle::load_or_default(
@@ -154,6 +213,7 @@ impl UpdaterState {
             patch_public_key: patch_public_key.map(|s| s.to_owned()),
             verification_mode,
             serialized_state,
+            instance_id,
         })
     }
 
@@ -274,10 +334,30 @@ impl UpdaterState {
 
     /// Saves the top-level (non-patch) state to disk.
     pub fn save(&self) -> Result<()> {
-        disk_io::write(
+        let fp = state_fingerprint(&self.serialized_state);
+        let qlen = self.serialized_state.queued_events.len();
+        state_diag(
+            &self.cache_dir,
+            &format!(
+                "SAVE_BEGIN instance={} queue_len={} fingerprint={}",
+                self.instance_id, qlen, fp
+            ),
+        );
+        let result = disk_io::write(
             &self.serialized_state,
             &self.cache_dir.join(STATE_FILE_NAME),
-        )
+        );
+        state_diag(
+            &self.cache_dir,
+            &format!(
+                "SAVE_END instance={} queue_len={} fingerprint={} result={}",
+                self.instance_id,
+                qlen,
+                fp,
+                if result.is_ok() { "ok" } else { "ERR" }
+            ),
+        );
+        result
     }
 }
 
@@ -404,12 +484,27 @@ impl UpdaterState {
     /// Adds `event` to the end of the queue, dropping the oldest events if
     /// the queue would hold more than [`MAX_QUEUED_EVENTS`].
     pub fn queue_event(&mut self, event: PatchEvent) -> Result<()> {
+        let before = self.serialized_state.queued_events.len();
+        // The event's OWN identity, not merely a length delta: a queue that grew
+        // by one does not prove which event it grew by.
+        let what = format!("{:?}/{:?}", event.identifier, event.outcome);
         let events = &mut self.serialized_state.queued_events;
         events.push(event);
         if events.len() > MAX_QUEUED_EVENTS {
             let excess = events.len() - MAX_QUEUED_EVENTS;
             events.drain(..excess);
         }
+        state_diag(
+            &self.cache_dir,
+            &format!(
+                "QUEUE_EVENT instance={} event={} queue_len={}->{} fingerprint={}",
+                self.instance_id,
+                what,
+                before,
+                self.serialized_state.queued_events.len(),
+                state_fingerprint(&self.serialized_state),
+            ),
+        );
         self.save()
     }
 
