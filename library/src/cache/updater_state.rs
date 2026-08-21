@@ -546,6 +546,50 @@ impl UpdaterState {
         self.save()
     }
 
+    /// Moves ONE queued entry equal to `event` to the BACK of the queue, then
+    /// persists. Used when a send fails.
+    ///
+    /// WHY THIS EXISTS — measurement integrity, not tidiness.
+    ///
+    /// `copy_events` takes the FIRST n. Combined with retain-on-failure, that means
+    /// n permanently-failing events at the head form a permanent batch: every flush
+    /// retries the same n and nothing behind them is ever sent. With n = 3, three
+    /// stuck events censor the queue indefinitely — and the events most likely to
+    /// be behind them are the lifecycle records that fleet policy is derived from.
+    /// A silently censored numerator is the same failure class as the dedupe
+    /// collision and the queue wipe, arrived at a third way.
+    ///
+    /// Rotating a failed event to the back keeps at-least-once retention — nothing
+    /// is dropped — while guaranteeing every queued event eventually reaches the
+    /// head. Send order is no longer strictly FIFO; nothing depends on it, since
+    /// each event carries its own timestamp and dedupe identity.
+    ///
+    /// Does NOT bound queue growth while the server is unreachable. That is a
+    /// separate concern and deliberately untouched here.
+    pub fn requeue_failed_event(&mut self, event: &PatchEvent) -> Result<bool> {
+        let before = self.serialized_state.queued_events.len();
+        let mut rotated = false;
+        if let Some(idx) = self
+            .serialized_state
+            .queued_events
+            .iter()
+            .position(|queued| queued == event)
+        {
+            let e = self.serialized_state.queued_events.remove(idx);
+            self.serialized_state.queued_events.push(e);
+            rotated = true;
+        }
+        state_diag(
+            &self.cache_dir,
+            &format!(
+                "REQUEUE_FAILED instance={} event={:?}/{:?} rotated={} queue_len={}",
+                self.instance_id, event.identifier, event.outcome, rotated, before
+            ),
+        );
+        self.save()?;
+        Ok(rotated)
+    }
+
     /// Removes ONE queued entry equal to `event`, then persists.
     ///
     /// THE INVARIANT THIS EXISTS TO ENFORCE:

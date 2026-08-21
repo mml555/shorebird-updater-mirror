@@ -107,6 +107,16 @@ pub struct PatchEvent {
     /// Care should be taken that this field *never* contain PII or sensitive information.
     pub message: Option<String>,
 
+    /// The updater revision that produced this event. Not PII: it identifies the
+    /// CLIENT CODE, not the device or user.
+    ///
+    /// Sent on EVERY event type, deliberately. Eligibility for policy analysis is a
+    /// property of the behaviour-bearing client code — whether it shipped the
+    /// event-loss fixes — and inferring that from an app release version is a proxy
+    /// that only works for one app. `"unknown"` when the build could not determine
+    /// it, which the server must treat as pre-epoch rather than trusting.
+    pub updater_revision: String,
+
     // ---- Boot-lifecycle fields ----
     //
     // All optional and skipped when absent, so every pre-existing event type
@@ -158,6 +168,7 @@ impl PatchEvent {
             release_version: config.release_version.clone(),
             timestamp: time::unix_timestamp(),
             message: message.map(|s| s.to_string()),
+            updater_revision: env!("UPDATER_REVISION").to_string(),
             outcome: None,
             ambiguous_attempt_count: None,
             boot_failure_threshold: None,

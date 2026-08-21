@@ -500,6 +500,13 @@ fn update_internal(_: &UpdaterLockState, channel: Option<&str>) -> anyhow::Resul
             }
             Err(err) => {
                 shorebird_error!("Failed to report event: {:?}", err);
+                // Rotate to the back so a permanently failing event cannot hold the
+                // head of a first-n batch and censor everything behind it — which
+                // would silently drop the lifecycle records fleet policy is derived
+                // from. Nothing is discarded.
+                if let Err(err) = with_mut_state(|state| state.requeue_failed_event(&event)) {
+                    shorebird_error!("Failed to requeue failed event: {:?}", err);
+                }
             }
         }
     }
@@ -1748,6 +1755,50 @@ mod tests {
         Ok(())
     }
 
+    /// MEASUREMENT INTEGRITY: three permanently-failing events at the head of a
+    /// first-3 batch must not censor a lifecycle event behind them.
+    ///
+    /// Without rotation the batch is always the same three, and nothing behind them
+    /// is ever sent — silently zeroing a recovery numerator, the same failure class
+    /// as the dedupe collision and the queue wipe reached a third way.
+    #[serial]
+    #[test]
+    fn rotation_stops_stuck_events_from_censoring_a_lifecycle_event() -> anyhow::Result<()> {
+        let _g = GlobalTestState::acquire();
+        let tmp_dir = TempDir::new().unwrap();
+        init_for_testing(&tmp_dir, None);
+        let config = &cfg_clone();
+
+        let stuck: Vec<_> = (1..=3).map(|n| ev(config, n)).collect();
+        let recovery = PatchEvent::boot_lifecycle(
+            config, 1, "c".to_string(), BootOutcome::RecoveredAfterAmbiguity, 1, 2, None,
+        );
+        for e in stuck.iter().chain(std::iter::once(&recovery)) {
+            crate::with_mut_state(|s| s.queue_event(e.clone()))?;
+        }
+
+        // Before rotation the recovery is unreachable: the batch is the first 3.
+        let batch = with_state(|s| Ok(s.copy_events(3)))?;
+        assert!(
+            !batch.iter().any(|e| e.outcome == Some(BootOutcome::RecoveredAfterAmbiguity)),
+            "precondition: the recovery starts behind the stuck head"
+        );
+
+        // Simulate one flush where all three fail and are rotated.
+        for e in &batch {
+            assert!(crate::with_mut_state(|s| s.requeue_failed_event(e))?);
+        }
+
+        let next = with_state(|s| Ok(s.copy_events(3)))?;
+        assert!(
+            next.iter().any(|e| e.outcome == Some(BootOutcome::RecoveredAfterAmbiguity)),
+            "after rotation the recovery must reach the batch, else it is censored: {next:?}"
+        );
+        // Nothing was dropped.
+        assert_eq!(with_state(|s| Ok(s.copy_events(99).len()))?, 4);
+        Ok(())
+    }
+
     /// The state-diagnostic must record a LOST UPDATE in a mechanically
     /// recognisable shape. Constructed here deliberately: if the trace cannot
     /// express the defect we are hunting, an absence of it on device proves
@@ -2917,6 +2968,7 @@ patch_verification: bogus_mode
                 ambiguous_attempt_count: None,
                 boot_failure_threshold: None,
                 boot_started_at: None,
+                updater_revision: "test".to_string(),
             };
             // Queue 5 events.
             assert!(state.queue_event(fail_event.clone()).is_ok());

@@ -374,12 +374,17 @@ mod tests {
             ambiguous_attempt_count: None,
             boot_failure_threshold: None,
             boot_started_at: None,
+            updater_revision: "test".to_string(),
         };
         let request = super::CreatePatchEventRequest { event };
         let json_string = serde_json::to_string(&request).unwrap();
         assert_eq!(
             json_string,
-            r#"{"event":{"app_id":"app_id","arch":"arch","client_id":"client_id","type":"__patch_install__","patch_number":1,"platform":"platform","release_version":"release_version","timestamp":1234,"message":null}}"#
+            // DELIBERATE ENVELOPE CHANGE: `updater_revision` now travels on
+            // EVERY event, so policy eligibility is decided by the
+            // behaviour-bearing client code rather than inferred from an app
+            // release version.
+            r#"{"event":{"app_id":"app_id","arch":"arch","client_id":"client_id","type":"__patch_install__","patch_number":1,"platform":"platform","release_version":"release_version","timestamp":1234,"message":null,"updater_revision":"test"}}"#
         )
     }
 
@@ -399,12 +404,13 @@ mod tests {
             ambiguous_attempt_count: None,
             boot_failure_threshold: None,
             boot_started_at: None,
+            updater_revision: "test".to_string(),
         };
         let request = super::CreatePatchEventRequest { event };
         let json_string = serde_json::to_string(&request).unwrap();
         assert_eq!(
             json_string,
-            r#"{"event":{"app_id":"app_id","arch":"arch","client_id":"client_id","type":"__patch_install__","patch_number":1,"platform":"platform","release_version":"release_version","timestamp":1234,"message":"hello"}}"#
+            r#"{"event":{"app_id":"app_id","arch":"arch","client_id":"client_id","type":"__patch_install__","patch_number":1,"platform":"platform","release_version":"release_version","timestamp":1234,"message":"hello","updater_revision":"test"}}"#
         )
     }
 
@@ -513,6 +519,7 @@ mod tests {
             ambiguous_attempt_count: None,
             boot_failure_threshold: None,
             boot_started_at: None,
+            updater_revision: "test".to_string(),
         };
         let result = super::report_event_default(
             // Make the request to a non-existent URL, which will trigger the
@@ -547,6 +554,7 @@ mod tests {
                     ambiguous_attempt_count: None,
                     boot_failure_threshold: None,
                     boot_started_at: None,
+                    updater_revision: "test".to_string(),
                 },
             },
         );

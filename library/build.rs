@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 fn main() {
     let crate_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
 
+    emit_updater_revision(&crate_dir);
+
     // Each header is generated from a single source file. cbindgen scans
     // exactly that file and emits the `pub extern "C"` items it defines plus
     // the C types they reference. Since each bucket file is self-contained
@@ -54,4 +56,37 @@ fn generate_header(crate_dir: &Path, config_name: &str, src_relative: &str, outp
             // working when cbindgen has an issue.
         }
     }
+}
+
+/// Stamps the updater's own git revision into the binary as `UPDATER_REVISION`.
+///
+/// WHY. Event eligibility for lifecycle/policy analysis must be decided by the
+/// BEHAVIOUR-BEARING CLIENT CODE, not inferred from an app release version. Three
+/// separate defects (server dedupe collision, whole-queue wipe, head-of-line
+/// starvation) each silently zeroed the recovery numerator, and each was fixed in
+/// THIS crate — so "did this client ship the fixes" is a fact about this revision.
+/// Without it the server can only approximate the epoch by naming app releases,
+/// which is a proxy that breaks for every other app.
+///
+/// Never fails the build: an unavailable git tree yields "unknown", which the
+/// server treats as pre-epoch rather than trusting it.
+fn emit_updater_revision(crate_dir: &Path) {
+    let repo_root = crate_dir.parent().unwrap_or(crate_dir);
+    let rev = std::process::Command::new("git")
+        .args(["-C"])
+        .arg(repo_root)
+        .args(["rev-parse", "--short=12", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Rebuild when HEAD moves, so the stamp cannot go stale silently.
+    let git_head = repo_root.join(".git").join("HEAD");
+    if git_head.exists() {
+        println!("cargo:rerun-if-changed={}", git_head.display());
+    }
+    println!("cargo:rustc-env=UPDATER_REVISION={rev}");
 }
