@@ -65,28 +65,61 @@ fn generate_header(crate_dir: &Path, config_name: &str, src_relative: &str, outp
 /// separate defects (server dedupe collision, whole-queue wipe, head-of-line
 /// starvation) each silently zeroed the recovery numerator, and each was fixed in
 /// THIS crate — so "did this client ship the fixes" is a fact about this revision.
-/// Without it the server can only approximate the epoch by naming app releases,
-/// which is a proxy that breaks for every other app.
 ///
-/// Never fails the build: an unavailable git tree yields "unknown", which the
-/// server treats as pre-epoch rather than trusting it.
+/// READS THE GIT FILES DIRECTLY, no subprocess. The first version shelled out to
+/// `git`, which is not on PATH inside the ninja action that builds this crate for
+/// the engine, so it silently produced "unknown" — an engine that could never be
+/// matched to an eligible revision. Caught only because the stamp is verified in
+/// the shipped bytes.
+///
+/// Never fails the build: anything unreadable yields "unknown", which the server
+/// treats as ineligible rather than trusting.
 fn emit_updater_revision(crate_dir: &Path) {
     let repo_root = crate_dir.parent().unwrap_or(crate_dir);
-    let rev = std::process::Command::new("git")
-        .args(["-C"])
-        .arg(repo_root)
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+    let git_dir = repo_root.join(".git");
+    let head_path = git_dir.join("HEAD");
 
-    // Rebuild when HEAD moves, so the stamp cannot go stale silently.
-    let git_head = repo_root.join(".git").join("HEAD");
-    if git_head.exists() {
-        println!("cargo:rerun-if-changed={}", git_head.display());
+    let mut rev = String::from("unknown");
+    let mut watch = vec![head_path.clone()];
+
+    if let Ok(head) = std::fs::read_to_string(&head_path) {
+        let head = head.trim().to_string();
+        if let Some(ref_name) = head.strip_prefix("ref: ") {
+            // Symbolic HEAD: the sha lives in the ref file, NOT in HEAD. HEAD's
+            // contents do not change when a commit lands on the branch, which is
+            // why watching HEAD alone left the stamp frozen.
+            let ref_path = git_dir.join(ref_name);
+            watch.push(ref_path.clone());
+            if let Ok(sha) = std::fs::read_to_string(&ref_path) {
+                let sha = sha.trim().to_string();
+                if !sha.is_empty() {
+                    rev = sha;
+                }
+            } else if let Ok(packed) = std::fs::read_to_string(git_dir.join("packed-refs")) {
+                // Ref may be packed rather than loose.
+                watch.push(git_dir.join("packed-refs"));
+                for line in packed.lines() {
+                    if let Some((sha, name)) = line.split_once(' ') {
+                        if name.trim() == ref_name {
+                            rev = sha.trim().to_string();
+                            break;
+                        }
+                    }
+                }
+            }
+        } else if !head.is_empty() {
+            rev = head; // detached HEAD holds the sha directly
+        }
+    }
+
+    if rev != "unknown" && rev.len() > 12 {
+        rev.truncate(12);
+    }
+
+    for path in watch {
+        if path.exists() {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
     }
     println!("cargo:rustc-env=UPDATER_REVISION={rev}");
 }
