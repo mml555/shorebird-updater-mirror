@@ -124,6 +124,22 @@ pub struct PatchEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
 
+    /// The updater revision that produced this event. Not PII: it identifies the
+    /// CLIENT CODE, not the device or user.
+    ///
+    /// Sent on EVERY event type, deliberately. Eligibility for policy analysis is a
+    /// property of the behaviour-bearing client code — whether it shipped the
+    /// event-loss fixes — and inferring that from an app release version is a proxy
+    /// that only works for one app. `"unknown"` when the build could not determine
+    /// it, which the server must treat as pre-epoch rather than trusting.
+    ///
+    /// `#[serde(default)]` (a port change): events already queued in a
+    /// `state.json` written by an updater without this field must still
+    /// deserialize, or one old queued event would make the whole state
+    /// unreadable after an upgrade.
+    #[serde(default = "unknown_updater_revision")]
+    pub updater_revision: String,
+
     // ---- Boot-lifecycle fields ----
     //
     // All optional and skipped when absent, so every pre-existing event type
@@ -156,6 +172,10 @@ pub struct PatchEvent {
     pub boot_started_at: Option<u64>,
 }
 
+fn unknown_updater_revision() -> String {
+    "unknown".to_string()
+}
+
 impl PatchEvent {
     /// Creates a `PatchEvent` for the given `EventType` and patch number for reporting to the server.
     pub fn new(
@@ -177,6 +197,7 @@ impl PatchEvent {
             message: message.map(|s| s.to_string()),
             failure_category: None,
             event_id: Some(uuid::Uuid::new_v4().to_string()),
+            updater_revision: env!("UPDATER_REVISION").to_string(),
             outcome: None,
             ambiguous_attempt_count: None,
             boot_failure_threshold: None,
