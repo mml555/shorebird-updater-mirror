@@ -427,6 +427,37 @@ impl UpdaterState {
             .validate_next_boot_patch(self.patch_public_key.as_deref(), self.verification_mode)
     }
 
+    /// Validates, selects and ATTRIBUTES the next boot in one transition, and
+    /// returns the patch that must actually be executed.
+    ///
+    /// The invariant, true by construction rather than by ordering luck:
+    ///
+    ///   currently_booting_patch == the patch number of the returned PatchInfo
+    ///
+    /// The old boot surface established attribution BEFORE validation, so a
+    /// candidate rejected for a bad signature stayed credited; a later
+    /// `record_boot_success` then promoted it and `cleanup_older_than` deleted
+    /// the fallback that had actually booted. Measured on device in
+    /// `selfhost/evidence/p6-signing/ARM_C_EXECUTION_IDENTITY.md`.
+    ///
+    /// Rejecting a candidate is a NORMAL outcome, not an error: the patch is
+    /// tombstoned, the pointer recomputed, and the fallback returned. Failure to
+    /// persist that tombstone, or to record the boot start for the selected
+    /// patch, propagates — the rejected candidate is never returned.
+    pub fn prepare_next_boot(&mut self) -> Result<Option<PatchInfo>> {
+        if let Err(e) = self.validate_next_boot_patch() {
+            shorebird_info!("Next boot candidate rejected: {:?}", e);
+        }
+
+        // Read the pointer only AFTER validation has had its say.
+        let selected = self.next_boot_patch();
+        self.set_running_patch(selected.as_ref().map(|p| p.number));
+        if let Some(patch) = &selected {
+            self.record_boot_start_for_patch(patch.number)?;
+        }
+        Ok(selected)
+    }
+
     /// Moves the inflated artifact at `patch.path` into the lifecycle's
     /// installed location, validates the signature in `InstallOnly`
     /// mode, transitions the patch to `Installed`, and promotes it to
@@ -659,6 +690,156 @@ mod tests {
             None,
             PatchVerificationMode::default(),
         )
+    }
+
+    /// Installs `number` and makes it the next boot candidate.
+    fn install(state: &mut UpdaterState, tmp: &TempDir, number: usize) {
+        let p = fake_artifact(tmp, number);
+        state.install_patch(&p, "hash", None).unwrap();
+        state.save().unwrap();
+    }
+
+    /// Re-opens the state in Strict mode under `TEST_PUBLIC_KEY`, which nothing
+    /// installed by `install()` is signed by. A candidate therefore fails for a
+    /// SIGNATURE reason -- the Arm C device defect -- rather than a size one.
+    fn reopen_strict(tmp: &TempDir) -> UpdaterState {
+        load_with_verification(tmp, Some(TEST_PUBLIC_KEY), PatchVerificationMode::Strict)
+    }
+
+    // ---- prepare_next_boot ---------------------------------------------------
+    // Every row asserts BOTH halves -- the returned patch AND the attribution --
+    // because the surface this replaces had them agree in the happy path and
+    // disagree exactly when a candidate was rejected, which is how the defect
+    // survived.
+
+    #[test]
+    fn prepare_returns_the_candidate_when_it_validates() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = load(&tmp, "1.0.0+1");
+        install(&mut state, &tmp, 1);
+        install(&mut state, &tmp, 2);
+
+        let selected = state.prepare_next_boot().unwrap();
+        assert_eq!(selected.map(|p| p.number), Some(2));
+        assert_eq!(state.lifecycle.pointers().currently_booting_patch, Some(2));
+        assert_eq!(state.running_patch().map(|p| p.number), Some(2));
+    }
+
+    #[test]
+    fn prepare_falls_back_and_attributes_the_fallback_not_the_candidate() {
+        // THE LOAD-BEARING REGRESSION. Patch 1 known-good, patch 2 present but
+        // unverifiable. The old surface credited patch 2 here.
+        let tmp = TempDir::new().unwrap();
+        let mut state = load(&tmp, "1.0.0+1");
+        install(&mut state, &tmp, 1);
+        state.lifecycle.record_boot_start(1).unwrap();
+        state.lifecycle.record_boot_success().unwrap();
+        install(&mut state, &tmp, 2);
+
+        let mut strict = reopen_strict(&tmp);
+        let selected = strict.prepare_next_boot().unwrap();
+
+        assert_eq!(
+            selected.map(|p| p.number),
+            Some(1),
+            "must return the fallback, not the rejected candidate"
+        );
+        assert_eq!(
+            strict.lifecycle.pointers().currently_booting_patch,
+            Some(1),
+            "attribution must name the patch actually selected"
+        );
+        assert!(
+            matches!(
+                strict.lifecycle.read_state(2),
+                Some(PatchState::Bad {
+                    reason: BadReason::ValidationFailed,
+                    ..
+                })
+            ),
+            "the rejected candidate must be tombstoned"
+        );
+    }
+
+    #[test]
+    fn prepare_success_after_fallback_keeps_the_fallback_installed() {
+        // The consequence the device run exposed: with correct attribution a
+        // successful boot promotes patch 1, so cleanup_older_than(1) cannot
+        // delete patch 1 and no retention exception is needed.
+        let tmp = TempDir::new().unwrap();
+        let mut state = load(&tmp, "1.0.0+1");
+        install(&mut state, &tmp, 1);
+        state.lifecycle.record_boot_start(1).unwrap();
+        state.lifecycle.record_boot_success().unwrap();
+        install(&mut state, &tmp, 2);
+
+        let mut strict = reopen_strict(&tmp);
+        strict.prepare_next_boot().unwrap();
+        let success = strict.lifecycle.record_boot_success().unwrap();
+
+        assert_eq!(success.patch, 1);
+        assert_eq!(strict.lifecycle.pointers().last_booted_patch, Some(1));
+        assert!(
+            matches!(
+                strict.lifecycle.read_state(1),
+                Some(PatchState::Installed { .. })
+            ),
+            "patch 1 must survive: it is what booted"
+        );
+        assert!(
+            strict.lifecycle.installed_artifact_path(1).exists(),
+            "the fallback ARTIFACT must survive, not just its state record"
+        );
+        assert!(matches!(
+            strict.lifecycle.read_state(2),
+            Some(PatchState::Bad { .. })
+        ));
+    }
+
+    #[test]
+    fn prepare_returns_base_when_the_only_candidate_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let mut state = load(&tmp, "1.0.0+1");
+        install(&mut state, &tmp, 1);
+
+        let mut strict = reopen_strict(&tmp);
+        let selected = strict.prepare_next_boot().unwrap();
+        assert!(selected.is_none(), "no usable patch means the base release");
+        assert_eq!(
+            strict.lifecycle.pointers().currently_booting_patch,
+            None,
+            "the base release must not be attributed to a patch"
+        );
+        assert_eq!(strict.running_patch().map(|p| p.number), None);
+    }
+
+    #[test]
+    fn prepare_attribution_survives_a_later_pointer_change() {
+        // Why attribution is bound to the RETURNED patch and not re-read later:
+        // next_boot_patch may legitimately change after preparation (update
+        // thread, promotion). The patch being booted must not.
+        let tmp = TempDir::new().unwrap();
+        let mut state = load(&tmp, "1.0.0+1");
+        install(&mut state, &tmp, 1);
+
+        let selected = state.prepare_next_boot().unwrap();
+        assert_eq!(selected.map(|p| p.number), Some(1));
+
+        // A newer patch is installed and promoted before the launch succeeds.
+        install(&mut state, &tmp, 3);
+        assert_eq!(state.next_boot_patch().map(|p| p.number), Some(3));
+
+        assert_eq!(
+            state.lifecycle.pointers().currently_booting_patch,
+            Some(1),
+            "the patch being booted must not follow a later pointer change"
+        );
+        let success = state.lifecycle.record_boot_success().unwrap();
+        assert_eq!(
+            success.patch, 1,
+            "launch success must credit the patch that ran, not the newest one"
+        );
+        assert_eq!(state.lifecycle.pointers().last_booted_patch, Some(1));
     }
 
     #[test]
