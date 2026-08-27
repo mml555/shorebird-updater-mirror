@@ -5,7 +5,10 @@ pub mod lifecycle;
 /// quietly depend on internals the product path does not use.
 #[cfg(test)]
 mod lifecycle_policy_tests;
-mod signing;
+// pub(crate), NOT pub: `testing_check_signature` in updater.rs needs to reach
+// the production verifier from inside this crate, without widening the module
+// into the library's public API.
+pub(crate) mod signing;
 pub mod state_lock;
 pub mod updater_state;
 
