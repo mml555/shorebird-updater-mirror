@@ -21,7 +21,7 @@ test-hooks = []
 [dependencies]
 # Used for error handling for now.
 anyhow = "1.0.69"
-base64 = "0.22.0"
+base64 = "0.23.1"
 # For inflating compressed patch files.
 bipatch = "1.0.0"
 # Used for exposing C API
@@ -55,7 +55,7 @@ serde_json = "1.0.93"
 sha2 = "0.11.0"
 uuid = { version = "1.18.1", features = ["v4"] }
 # For decompressing .apk files.
-zip = { version = "8.5.1", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 # For logging to Android logcat.
@@ -78,7 +78,7 @@ mockito = "1.2.0"
 mock_instant = "0.6.0"
 # Gives #[serial] attribute for locking all of our shorebird_init
 # tests to a single thread so they don't conflict with each other.
-serial_test = "3.2.0"
+serial_test = "4.0.1"
 tempfile = "3"
 
 # <https://github.com/eqrion/cbindgen/blob/master/docs.md#buildrs>
