@@ -106,13 +106,32 @@ assert on.
 * **MEASUREMENT_MODE freeze.** `updater_revision` will stamp the post-port commit sha,
   which is not in `eligibleUpdaterRevisions`. Behaviour also changed (retry/flush
   semantics, inline flush, at-least-once delivery), so adding it is a policy decision.
-* **Not in this mirror.** `vendor/updater` in the self-host repo contains fork work that
-  is not on route-b and was NOT ported: `530f5e1a0`, `c7963536d` (assets-only patches,
-  `dlc.assets`, `PatchPayloadKind`, `supported_patch_kinds`), `0b80cdb73` (test-hook
-  `shorebird_test_check_signature`). It lacks the boot-lifecycle event work, so the two lineages
-  are disjoint. Without the assets work the ported updater inflates an assets patch as
-  a code diff and tombstones it. The server withholds assets patches unless the client
-  sends `supported_patch_kinds` containing `assets`, which this port never sends.
+* **Assets-only work: ported (follow-up).** From the self-host repo's `vendor/updater`
+  (format-patch `--relative=vendor/updater`, `git am -3`, same branch):
+  `530f5e1a0` -> `cb80a59`, `c7963536d` -> `641830e`, `0b80cdb73` -> `b2863f9`
+  (assets patches, `dlc.assets`, `PatchPayloadKind`, `supported_patch_kinds`, the
+  test-only `shorebird_test_check_signature`), plus fixup `652bb1b` (below).
+* **Self-host default stays `install_only` in code.** Self-host apps that want per-boot
+  re-verification must set `patch_verification: strict` explicitly in their checked-in
+  shorebird.yaml.
+* **Open item: `updater_revision` / `eligibleUpdaterRevisions`.** Not changed. The
+  stamped sha is not in `eligibleUpdaterRevisions`; whether to add it is the owner's
+  decision (see MEASUREMENT_MODE freeze above).
+* **Rotation (`requeue_failed_event`) keeps upstream's stop-at-first-failure.** Server
+  contract: `/events` must answer a permanently bad event with 400 or 422 (413 is also
+  dropped), never 401, 403 or 404, or the queue blocks behind it. Current
+  `packages/code_push_server` (self-host ref `selfhost/upstream-sync-1.6.138`,
+  `api.dart` `_patchesEvents`, read-only) breaks this in two ways:
+  1. A poison event the DB rejects (for example a NUL character in `raw`, which
+     Postgres refuses in text) throws in the `try` insert, then again in the `catch`
+     fallback `insertEvent(raw: raw)`, giving 500 via `_route`. 5xx is transient to
+     the updater, so that event blocks the queue permanently.
+  2. Any path outside `/api/v1/patches/events` or `/patches/events` (a proxy prefix, a
+     wrong `base_url`) gets 404 `not_found`, and a request that loses its public-route
+     status would get 403 `forbidden` from `_auth`. Both are the refused-forever codes.
+  Otherwise fine: malformed JSON or wrong field types answer 204 (stored raw), oversize
+  bodies 413, rate limiting 429 (transient, correct). Fix 1 by returning 422 when the
+  fallback insert fails.
 
 ## Signature verification in `install_only`
 
@@ -138,15 +157,14 @@ route-b; the vendor copy at lifecycle.rs:800 and updater_state.rs:394), and is f
 the port. Upstream's own comment on the new default says never to backport it to an
 updater without install-time verification, which the old fork base lacked.
 
-**Assets-only patches.** The port has no `dlc.assets` concept, so there is no separate
-path. A patch offered with an assets payload would go through the same signature check
-(before download, both modes) and then fail inflate. On the vendor copy, assets are
-hash-checked on the downloaded bytes and the signature is checked only by the Strict
-boot path (`validate_installed_patch` resolving the `dlc.assets` artifact), so in
-`install_only` they are not verified on the vendor copy. Fix if the assets work is
-ported: call `check_patch_signature(&patch.hash, ...)` at the top of the assets install
-branch (the hash there is `sha256(downloaded bytes)`), exactly as `download_and_install_patch`
-does for code, before any bytes are fetched.
+**Assets-only patches.** `download_and_install_patch` is shared by both payload kinds
+and calls `check_patch_signature(&patch.hash, ...)` before any fetch
+(`library/src/updater.rs`, top of that function), so an assets patch is verified at
+install in every mode. The vendor copy lacked this in `install_only` (signature checked
+only by the Strict boot path); the port closes it. Test:
+`badly_signed_assets_patch_is_refused_at_install_before_any_download` (bad and missing
+signature, `install_only`: `InvalidSignature`, tombstoned, zero downloads, no
+`dlc.assets`). The hash on the assets path is `sha256(downloaded bytes)`.
 
 ## Server-facing changes versus UPDATER_CONTRACT.md
 
@@ -205,3 +223,9 @@ Needs `cargo build` and `cargo test -p updater --lib` (and `-p patch`) on ci-bui
 * `build.rs` stamp when the crate is built outside a git checkout (gives `unknown`);
 * cbindgen output for `library/include/updater_engine.h` (edited by cherry-pick, not
   regenerated).
+
+Also needed for the assets work: the assets install/unzip tests and the `zip` crate
+feature set (deflate); `library_test_hooks` build (`shorebird_test_check_signature`);
+`network.rs` pinned request tests (`supported_patch_kinds`) and every `Patch { .. }`
+literal (`kind`); the new assets signature test; `lifecycle.rs` `PatchKind` /
+`installed_artifact_path_for` merged with the fork's boot-lifecycle fields.
