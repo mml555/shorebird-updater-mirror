@@ -4006,6 +4006,7 @@ patch_verification: bogus_mode
     // (these tests are `#[serial]`).
     static OFFERED_SIGNATURE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     static DOWNLOADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static OFFER_ASSETS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     /// Initializes the updater with `extra_yaml` and a server offering patch
     /// 1 ("hello world" → "hello tests") signed with `hash_signature`.
@@ -4016,6 +4017,7 @@ patch_verification: bogus_mode
 
         *OFFERED_SIGNATURE.lock().unwrap() = hash_signature.map(String::from);
         DOWNLOADS.store(0, std::sync::atomic::Ordering::SeqCst);
+        OFFER_ASSETS.store(false, std::sync::atomic::Ordering::SeqCst);
         testing_set_network_hooks(
             |_url, _request| {
                 Ok(PatchCheckResponse {
@@ -4025,6 +4027,11 @@ patch_verification: bogus_mode
                         hash: HELLO_TESTS_HASH.to_string(),
                         download_url: "http://example.com/patch/1".to_string(),
                         hash_signature: OFFERED_SIGNATURE.lock().unwrap().clone(),
+                        kind: if OFFER_ASSETS.load(std::sync::atomic::Ordering::SeqCst) {
+                            crate::network::PatchPayloadKind::Assets
+                        } else {
+                            crate::network::PatchPayloadKind::Code
+                        },
                     }),
                     rolled_back_patch_numbers: None,
                 })
@@ -4129,6 +4136,31 @@ patch_verification: bogus_mode
                 let result = super::update(None);
                 assert_refused(&tmp_dir, result, offered, cause)?;
             }
+        }
+        Ok(())
+    }
+
+    #[serial]
+    #[test]
+    fn badly_signed_assets_patch_is_refused_at_install_before_any_download() -> anyhow::Result<()> {
+        // `install_only` is the default mode: it never re-verifies at boot, so
+        // the install-time check is the only gate for an assets patch.
+        for (offered, cause) in [
+            (Some(WRONG_MESSAGE_SIGNATURE), "Patch signature is invalid"),
+            (None, "Patch signature is missing"),
+        ] {
+            let tmp_dir = TempDir::new().unwrap();
+            init_offering_signature(&tmp_dir, &signing_yaml("install_only"), offered);
+            OFFER_ASSETS.store(true, std::sync::atomic::Ordering::SeqCst);
+            let result = super::update(None);
+            // `assert_refused` also checks zero downloads, the tombstone and
+            // the single `invalid_signature` event.
+            assert_refused(&tmp_dir, result, offered, cause)?;
+            super::with_state(|state| {
+                assert_eq!(state.next_boot_patch(), None);
+                Ok(())
+            })?;
+            assert!(!tmp_dir.path().join("patches/1/dlc.assets").exists());
         }
         Ok(())
     }

@@ -569,6 +569,7 @@ impl std::fmt::Debug for PatchCheckRequest {
             arch,
             client_id: _,
             current_patch_number,
+            supported_patch_kinds,
         } = self;
         f.debug_struct("PatchCheckRequest")
             .field("app_id", app_id)
@@ -578,6 +579,7 @@ impl std::fmt::Debug for PatchCheckRequest {
             .field("arch", arch)
             .field("client_id", &"<redacted>")
             .field("current_patch_number", current_patch_number)
+            .field("supported_patch_kinds", supported_patch_kinds)
             .finish()
     }
 }
@@ -618,6 +620,7 @@ impl PatchCheckRequest {
             arch,
             client_id: _,
             current_patch_number,
+            supported_patch_kinds: _,
         } = self;
         format!(
             "app_id: {app_id}, channel: {channel}, release_version: {release_version}, platform: {platform}, arch: {arch}, current_patch_number: {current_patch_number:?}"
@@ -759,7 +762,7 @@ mod tests {
         let json_string = serde_json::to_string(&request).unwrap();
         assert_eq!(
             json_string,
-            r#"{"app_id":"app_id","channel":"stable","release_version":"1.0.0+1","platform":"android","arch":"aarch64","client_id":"11111111-2222-3333-4444-555555555555","current_patch_number":3}"#
+            r#"{"app_id":"app_id","channel":"stable","release_version":"1.0.0+1","platform":"android","arch":"aarch64","client_id":"11111111-2222-3333-4444-555555555555","current_patch_number":3,"supported_patch_kinds":["code","assets"]}"#
         );
     }
 
@@ -929,6 +932,7 @@ mod tests {
             arch: "aarch64".to_string(),
             client_id: "client_id".to_string(),
             current_patch_number: None,
+            supported_patch_kinds: vec!["code".to_string(), "assets".to_string()],
         }
     }
 

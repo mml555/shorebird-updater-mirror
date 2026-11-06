@@ -1078,6 +1078,7 @@ mod test {
                         hash: hash.to_owned(),
                         download_url: number.to_string(),
                         hash_signature: None,
+                        kind: Default::default(),
                     }),
                     rolled_back_patch_numbers: Some(vec![]),
                 })
