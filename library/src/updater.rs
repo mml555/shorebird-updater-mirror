@@ -1885,10 +1885,11 @@ mod tests {
     /// Polls `cond` until true or the deadline passes. Replaces fixed sleeps
     /// used to wait for work on a spawned thread — a fixed sleep asserts a
     /// timing guess, this asserts the condition.
+    #[allow(dead_code)] // port: tests flush inline now, so nothing waits on a thread
     fn wait_for(cond: impl Fn() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !cond() && std::time::Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 
@@ -1902,9 +1903,13 @@ mod tests {
         testing_reset_config();
         let cache_dir = tmp_dir.path().to_str().unwrap().to_string();
         let mut yaml = "app_id: 1234".to_string();
-        if let Some(url) = base_url {
-            yaml += &format!("\nbase_url: {}", url);
-        }
+        // Port: `report_launch_success` now flushes the event queue inline under
+        // test, so a test with no mock server must not reach the real default
+        // host (it could answer 4xx and the updater would then DROP the queued
+        // events the fork's tests assert on). Port 9 (discard) refuses at once,
+        // so events stay queued, which is what those tests expect.
+        let url = base_url.unwrap_or("http://127.0.0.1:9");
+        yaml += &format!("\nbase_url: {}", url);
         yaml += extra_yaml;
 
         let libapp_path = tmp_dir
