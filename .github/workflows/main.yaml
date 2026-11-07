@@ -16,10 +16,17 @@ on:
   push:
     branches:
       - main
+      # The port branch runs CI on push, without needing a PR.
+      - route-b
+      - route-b-*
 
+# Linux jobs run on the self-hosted ci-build runner (this repo is private, so
+# every event is trusted). Two stay on GitHub-hosted runners: the macOS and
+# Windows legs, and the Android leg of check_mobile_targets, which needs the
+# hosted image's NDK that ci-build does not have.
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, updater]
 
     permissions:
       contents: read
@@ -89,9 +96,10 @@ jobs:
     strategy:
       matrix:
         crate: ${{ fromJSON(needs.changes.outputs.needs_rust_build) }}
-        os: [macos-latest, nscloud-windows-2022-amd64-8x16, ubuntu-latest]
+        os: [macos-latest, windows-latest, ubuntu-latest]
 
-    runs-on: ${{ matrix.os }}
+    # ubuntu-latest in the matrix means the self-hosted runner.
+    runs-on: ${{ matrix.os == 'ubuntu-latest' && fromJSON('["self-hosted","linux","x64","updater"]') || matrix.os }}
 
     name: 🦀 Build ${{ matrix.crate }} (${{ matrix.os }})
 
@@ -114,6 +122,8 @@ jobs:
     strategy:
       matrix:
         include:
+          # Stays on the hosted runner: ci-build has no Android NDK, and cargo-ndk
+          # below needs the one the hosted image ships at ANDROID_NDK_HOME.
           - target: aarch64-linux-android
             os: ubuntu-latest
           - target: aarch64-apple-ios
@@ -156,7 +166,7 @@ jobs:
   # (config in deny.toml). Runs on every PR, not only Rust changes, so a
   # newly published advisory against a dependency we already ship fails CI.
   cargo_deny:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, updater]
 
     name: 🛡️ cargo deny
 
@@ -177,7 +187,7 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.changes.outputs.needs_flutter_build) }}
 
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, updater]
 
     name: 🎯 Build ${{ matrix.package }}
 
@@ -197,7 +207,7 @@ jobs:
     needs: [build_flutter_packages, build_rust_crates, cargo_deny, check_mobile_targets]
     if: ${{ always() }}
 
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, updater]
 
     steps:
       # A cancelled job never ran its checks, so it fails the gate too.

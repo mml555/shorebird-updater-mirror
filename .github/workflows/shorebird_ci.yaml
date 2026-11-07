@@ -17,7 +17,7 @@ on:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, updater]
     outputs:
       shorebird_code_push: ${{ steps.filter.outputs.shorebird_code_push }}
       shorebird_code_push_example: ${{ steps.filter.outputs.shorebird_code_push_example }}
@@ -66,6 +66,7 @@ jobs:
 
   cspell:
     name: CSpell
+    # Stays hosted: npx needs Node, which ci-build is not known to have.
     runs-on: ubuntu-latest
     # npx installs cspell's dependencies unpinned, so the job gets a
     # read-only token and checkout doesn't leave it in .git/config.
@@ -86,7 +87,7 @@ jobs:
       - shorebird_code_push
       - shorebird_code_push_example
       - cspell
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, updater]
     steps:
       - name: Check required jobs
         run: |
