@@ -24,4 +24,13 @@ runs:
     - name: Test
       working-directory: ${{ inputs.working_directory }}
       shell: bash
-      run: cargo test
+      # The home runners reach the internet only through an allowlisting proxy
+      # (http_proxy in the job env). Build and fetch through it, then run the
+      # tests without it: network::tests assert what a device with no network
+      # sees (an unresolvable host), and a proxy's CONNECT refusal is a
+      # different error. Runner users have no DNS, so the direct attempt fails
+      # the way those tests expect. Elsewhere no proxy is set and this is a no-op.
+      run: |
+        cargo test --no-run
+        env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
+          cargo test --offline
