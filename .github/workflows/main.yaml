@@ -20,13 +20,16 @@ on:
       - route-b
       - route-b-*
 
-# Every job runs on the self-hosted ci-build runner (this repo is private, so
-# every event is trusted). The macOS and Windows build legs and the iOS checks
+# Every job runs on the self-hosted ci-build runner, on trusted events only:
+# the repository is public, so a pull request from a fork runs nothing here
+# (each root job and the aggregate carry the guard below; the rest need
+# `changes`). The macOS and Windows build legs and the iOS checks
 # need GitHub-hosted runners (iOS needs the Apple SDK), which the account's
 # Actions billing may not cover. They only exist when the repository variable
 # HOSTED_RUNNERS is 'true'; otherwise they are skipped, not queued.
 jobs:
   changes:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64, updater]
 
     permissions:
@@ -178,6 +181,7 @@ jobs:
   # (config in deny.toml). Runs on every PR, not only Rust changes, so a
   # newly published advisory against a dependency we already ship fails CI.
   cargo_deny:
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64, updater]
 
     name: 🛡️ cargo deny
@@ -217,7 +221,7 @@ jobs:
 
   ci:
     needs: [build_flutter_packages, build_rust_crates, cargo_deny, check_android, check_ios]
-    if: ${{ always() }}
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
 
     runs-on: [self-hosted, linux, x64, updater]
 
