@@ -76,7 +76,8 @@
         "storage/patches/1/state.json",
         "storage/pointers.json",
         "storage/state.json",
-        "storage/state.lock"
+        "storage/state.lock",
+        "storage/state_diag.log"
       ]
     }
   ]

@@ -229,3 +229,34 @@ feature set (deflate); `library_test_hooks` build (`shorebird_test_check_signatu
 `network.rs` pinned request tests (`supported_patch_kinds`) and every `Patch { .. }`
 literal (`kind`); the new assets signature test; `lifecycle.rs` `PatchKind` /
 `installed_artifact_path_for` merged with the fork's boot-lifecycle fields.
+
+## CI bring-up (first compile)
+
+All three crates (`library`, `patch`, `library_test_hooks`) pass `cargo fmt --check`,
+`cargo clippy --all-targets -- -D warnings` and `cargo test` on the Linux runner. The
+generated headers (`library/include`, `library_test_hooks/include`) are byte-identical
+to what the build regenerates.
+
+* **Compile and lint.** Missing `bail` import; zip 9 `SimpleFileOptions`; tests updated
+  for upstream's fallible `load_or_new_on_error` and `&UpdaterState` from `with_state`;
+  `supported_patch_kinds` added to pinned `PatchCheckRequest` literals;
+  `clippy::type_complexity` fixed with a `PreparedBoot` alias; a `format!` with no
+  arguments removed; `cargo fmt`.
+* **Test race (real, in the port's tests).** The `prepare_next_boot` tests in
+  `updater_state.rs` write the process-global running patch but were not `#[serial]`,
+  so they flaked the serial `c_api` tests. They are now `#[serial]`.
+* **Fixture corpus adapted to the fork's behaviour** (`fixtures/cases`, replayed by
+  `library_test_hooks/tests/fixture_corpus.rs`). The corpus pins upstream's wire and
+  disk shape; the fork changes it on purpose, so the expectations were updated, not
+  loosened:
+  - patch-check request bodies carry `supported_patch_kinds: ["code","assets"]`;
+  - events carry `updater_revision` (matched as `<string>`);
+  - `pointers.json` carries `boot_attempt_count` and `last_boot_attempt_patch`;
+  - `state_diag.log` (and `success_diag.log` after launch success) appear in trees;
+  - the boot-failure threshold (2): a boot that did not finish is retried once
+    (`ambiguous_boot_retry`) and retired on the second (`retired_after_ambiguity`),
+    which also queues a `__patch_boot_lifecycle__` event next to
+    `__patch_install_failure__`. The four `crash_*` cases now preseed a tally at the
+    threshold and expect both events; `kill_during_boot_then_relaunch` and
+    `second_launch_start_in_process_boots_new_patch` repeat the death before the
+    retire. New case `boot/crash_below_threshold_retries_the_patch` pins the retry.

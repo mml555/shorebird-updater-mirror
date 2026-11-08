@@ -30,7 +30,11 @@
               "release_version": "1.0.0+1",
               "platform": "<platform>",
               "arch": "<arch>",
-              "client_id": "00000000-0000-4000-8000-000000000001"
+              "client_id": "00000000-0000-4000-8000-000000000001",
+              "supported_patch_kinds": [
+                "code",
+                "assets"
+              ]
             }
           },
           "response": {

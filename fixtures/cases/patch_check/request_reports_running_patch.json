@@ -56,7 +56,11 @@
               "platform": "<platform>",
               "arch": "<arch>",
               "client_id": "00000000-0000-4000-8000-000000000001",
-              "current_patch_number": 1
+              "current_patch_number": 1,
+              "supported_patch_kinds": [
+                "code",
+                "assets"
+              ]
             }
           },
           "response": {
@@ -83,7 +87,11 @@
               "platform": "<platform>",
               "arch": "<arch>",
               "client_id": "00000000-0000-4000-8000-000000000001",
-              "current_patch_number": 1
+              "current_patch_number": 1,
+              "supported_patch_kinds": [
+                "code",
+                "assets"
+              ]
             }
           },
           "response": {

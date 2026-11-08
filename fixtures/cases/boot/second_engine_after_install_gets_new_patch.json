@@ -62,7 +62,11 @@
               "platform": "<platform>",
               "arch": "<arch>",
               "client_id": "00000000-0000-4000-8000-000000000001",
-              "current_patch_number": 1
+              "current_patch_number": 1,
+              "supported_patch_kinds": [
+                "code",
+                "assets"
+              ]
             }
           },
           "response": {
@@ -107,7 +111,8 @@
                 "platform": "<platform>",
                 "release_version": "1.0.0+1",
                 "timestamp": "<number>",
-                "message": null
+                "message": null,
+                "updater_revision": "<string>"
               }
             }
           },
@@ -127,7 +132,9 @@
             "next_boot_patch": 2,
             "last_booted_patch": 1,
             "currently_booting_patch": null,
-            "boot_started_at": null
+            "boot_started_at": null,
+            "boot_attempt_count": 0,
+            "last_boot_attempt_patch": null
           }
         }
       }
@@ -156,7 +163,9 @@
             "next_boot_patch": 2,
             "last_booted_patch": 1,
             "currently_booting_patch": null,
-            "boot_started_at": null
+            "boot_started_at": null,
+            "boot_attempt_count": 0,
+            "last_boot_attempt_patch": null
           }
         }
       }
@@ -179,7 +188,9 @@
             "next_boot_patch": 2,
             "last_booted_patch": 1,
             "currently_booting_patch": 2,
-            "boot_started_at": "<number>"
+            "boot_started_at": "<number>",
+            "boot_attempt_count": 1,
+            "last_boot_attempt_patch": 2
           }
         }
       }
@@ -202,7 +213,8 @@
                 "platform": "<platform>",
                 "release_version": "1.0.0+1",
                 "timestamp": "<number>",
-                "message": null
+                "message": null,
+                "updater_revision": "<string>"
               }
             }
           },
@@ -218,7 +230,9 @@
             "next_boot_patch": 2,
             "last_booted_patch": 2,
             "currently_booting_patch": null,
-            "boot_started_at": null
+            "boot_started_at": null,
+            "boot_attempt_count": 0,
+            "last_boot_attempt_patch": null
           }
         }
       }

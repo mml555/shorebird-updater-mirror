@@ -1,5 +1,5 @@
 {
-  "description": "What the engine's once-per-process launch guard prevents: a second report_launch_start in the same process, after the update thread installed 2, records 2 as booting and makes it the running patch, though the first engine still runs 1. If the process then dies before a success report, the next launch counts it as a crash of 2: 2 is marked bad and 1 boots.",
+  "description": "What the engine's once-per-process launch guard prevents: a second report_launch_start in the same process, after the update thread installed 2, records 2 as booting and makes it the running patch, though the first engine still runs 1. If the process then dies before a success report, the next launch counts it as a crash of 2: 2 is marked bad and 1 boots. The updater retries a boot that did not finish once (retire threshold 2), so the death is repeated before the patch is retired.",
   "base": {
     "file": "bipatch/text_edit/base.bin"
   },
@@ -62,7 +62,11 @@
               "platform": "<platform>",
               "arch": "<arch>",
               "client_id": "00000000-0000-4000-8000-000000000001",
-              "current_patch_number": 1
+              "current_patch_number": 1,
+              "supported_patch_kinds": [
+                "code",
+                "assets"
+              ]
             }
           },
           "response": {
@@ -107,7 +111,8 @@
                 "platform": "<platform>",
                 "release_version": "1.0.0+1",
                 "timestamp": "<number>",
-                "message": null
+                "message": null,
+                "updater_revision": "<string>"
               }
             }
           },
@@ -127,7 +132,9 @@
             "next_boot_patch": 2,
             "last_booted_patch": 1,
             "currently_booting_patch": null,
-            "boot_started_at": null
+            "boot_started_at": null,
+            "boot_attempt_count": 0,
+            "last_boot_attempt_patch": null
           }
         }
       }
@@ -140,7 +147,9 @@
             "next_boot_patch": 2,
             "last_booted_patch": 1,
             "currently_booting_patch": 2,
-            "boot_started_at": "<number>"
+            "boot_started_at": "<number>",
+            "boot_attempt_count": 1,
+            "last_boot_attempt_patch": 2
           }
         }
       }
@@ -148,6 +157,20 @@
     {
       "call": "current_boot_patch_number",
       "expect": 2
+    },
+    {
+      "call": "restart"
+    },
+    {
+      "call": "init",
+      "expect": true
+    },
+    {
+      "call": "next_boot_patch_number",
+      "expect": 2
+    },
+    {
+      "call": "report_launch_start"
     },
     {
       "call": "restart"
@@ -168,7 +191,9 @@
             "next_boot_patch": 1,
             "last_booted_patch": 1,
             "currently_booting_patch": null,
-            "boot_started_at": null
+            "boot_started_at": null,
+            "boot_attempt_count": 0,
+            "last_boot_attempt_patch": null
           }
         },
         "storage/patches/2/state.json": {
@@ -186,6 +211,23 @@
             "release_version": "1.0.0+1",
             "queued_events": [
               {
+                "ambiguous_attempt_count": 1,
+                "app_id": "fixture-app-id",
+                "arch": "<arch>",
+                "boot_failure_threshold": 2,
+                "boot_started_at": "<number>",
+                "client_id": "00000000-0000-4000-8000-000000000001",
+                "event_id": "<uuid>",
+                "message": null,
+                "outcome": "ambiguous_boot_retry",
+                "patch_number": 2,
+                "platform": "<platform>",
+                "release_version": "1.0.0+1",
+                "timestamp": "<number>",
+                "type": "__patch_boot_lifecycle__",
+                "updater_revision": "<string>"
+              },
+              {
                 "app_id": "fixture-app-id",
                 "arch": "<arch>",
                 "client_id": "00000000-0000-4000-8000-000000000001",
@@ -195,7 +237,25 @@
                 "platform": "<platform>",
                 "release_version": "1.0.0+1",
                 "timestamp": "<number>",
-                "type": "__patch_install_failure__"
+                "type": "__patch_install_failure__",
+                "updater_revision": "<string>"
+              },
+              {
+                "ambiguous_attempt_count": 2,
+                "app_id": "fixture-app-id",
+                "arch": "<arch>",
+                "boot_failure_threshold": 2,
+                "boot_started_at": "<number>",
+                "client_id": "00000000-0000-4000-8000-000000000001",
+                "event_id": "<uuid>",
+                "message": null,
+                "outcome": "retired_after_ambiguity",
+                "patch_number": 2,
+                "platform": "<platform>",
+                "release_version": "1.0.0+1",
+                "timestamp": "<number>",
+                "type": "__patch_boot_lifecycle__",
+                "updater_revision": "<string>"
               }
             ]
           }

@@ -18,7 +18,11 @@
               "release_version": "1.0.0+1",
               "platform": "<platform>",
               "arch": "<arch>",
-              "client_id": "<uuid>"
+              "client_id": "<uuid>",
+              "supported_patch_kinds": [
+                "code",
+                "assets"
+              ]
             }
           },
           "response": {

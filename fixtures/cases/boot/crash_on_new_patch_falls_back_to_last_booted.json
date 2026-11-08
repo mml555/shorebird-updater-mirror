@@ -1,5 +1,5 @@
 {
-  "description": "Patch 2 crashed while booting; patch 1 booted before. Init tombstones 2 and falls back to 1.",
+  "description": "Patch 2 crashed while booting; patch 1 booted before. Init tombstones 2 and falls back to 1. The breadcrumb carries a boot-attempt tally at the retire threshold (2): below it the updater treats a boot that did not finish as ambiguous and retries it (see boot/crash_below_threshold_retries_the_patch).",
   "files": {
     "storage/state.json": {
       "json": {
@@ -13,7 +13,9 @@
         "next_boot_patch": 2,
         "last_booted_patch": 1,
         "currently_booting_patch": 2,
-        "boot_started_at": 1700000000
+        "boot_started_at": 1700000000,
+        "boot_attempt_count": 2,
+        "last_boot_attempt_patch": 2
       }
     },
     "storage/patches/1/state.json": {
@@ -51,7 +53,9 @@
             "next_boot_patch": 1,
             "last_booted_patch": 1,
             "currently_booting_patch": null,
-            "boot_started_at": null
+            "boot_started_at": null,
+            "boot_attempt_count": 0,
+            "last_boot_attempt_patch": null
           }
         },
         "storage/patches/2/state.json": {

@@ -80,7 +80,8 @@
                 "platform": "linux",
                 "release_version": "1.0.0+1",
                 "timestamp": 1700000000,
-                "message": "old"
+                "message": "old",
+                "updater_revision": "<string>"
               }
             ]
           }
@@ -94,7 +95,8 @@
         "cache/",
         "storage/not_ours.txt",
         "storage/state.json",
-        "storage/state.lock"
+        "storage/state.lock",
+        "storage/state_diag.log"
       ]
     }
   ]

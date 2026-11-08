@@ -40,7 +40,9 @@
             "next_boot_patch": 1,
             "last_booted_patch": null,
             "currently_booting_patch": 1,
-            "boot_started_at": "<number>"
+            "boot_started_at": "<number>",
+            "boot_attempt_count": 1,
+            "last_boot_attempt_patch": 1
           }
         }
       }
@@ -67,7 +69,8 @@
                 "platform": "<platform>",
                 "release_version": "1.0.0+1",
                 "timestamp": "<number>",
-                "message": null
+                "message": null,
+                "updater_revision": "<string>"
               }
             }
           },
@@ -83,7 +86,9 @@
             "next_boot_patch": 1,
             "last_booted_patch": 1,
             "currently_booting_patch": null,
-            "boot_started_at": null
+            "boot_started_at": null,
+            "boot_attempt_count": 0,
+            "last_boot_attempt_patch": null
           }
         }
       }
