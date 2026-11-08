@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::path::PathBuf;
 
 use crate::file_errors::{FileOperation, IoResultExt};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::cache::lifecycle::{
     self, BadReason, BootRecovery, DownloadAction, PatchKind, SkipReason,
@@ -1991,7 +1991,7 @@ mod install_asset_patch_tests {
     fn write_zip(path: &std::path::Path, entries: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).unwrap();
         let mut zip = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let options = zip::write::SimpleFileOptions::default();
         for (name, bytes) in entries {
             zip.start_file(*name, options).unwrap();
             zip.write_all(bytes).unwrap();
@@ -2397,7 +2397,7 @@ mod tests {
             let a = ev(config, 1);
             let b = ev(config, 2);
             crate::with_mut_state(|s| s.queue_event(a.clone()))?;
-            let batch = with_state(|s| Ok(s.copy_events(3)))?;   // copies A only
+            let batch = with_state(|s| Ok(s.copy_events(3)))?; // copies A only
             assert_eq!(batch.len(), 1);
             crate::with_mut_state(|s| s.queue_event(b.clone()))?; // B arrives mid-flush
             for e in &batch {
@@ -2469,13 +2469,25 @@ mod tests {
         {
             let config = &cfg_clone();
             let retry = PatchEvent::boot_lifecycle(
-                config, 1, "c".to_string(), BootOutcome::AmbiguousBootRetry, 1, 2, Some(9),
+                config,
+                1,
+                "c".to_string(),
+                BootOutcome::AmbiguousBootRetry,
+                1,
+                2,
+                Some(9),
             );
             let recovery = PatchEvent::boot_lifecycle(
-                config, 1, "c".to_string(), BootOutcome::RecoveredAfterAmbiguity, 1, 2, None,
+                config,
+                1,
+                "c".to_string(),
+                BootOutcome::RecoveredAfterAmbiguity,
+                1,
+                2,
+                None,
             );
             crate::with_mut_state(|s| s.queue_event(retry.clone()))?;
-            let batch = with_state(|s| Ok(s.copy_events(3)))?;      // retry only
+            let batch = with_state(|s| Ok(s.copy_events(3)))?; // retry only
             crate::with_mut_state(|s| s.queue_event(recovery.clone()))?;
             for e in &batch {
                 crate::with_mut_state(|s| s.acknowledge_sent_event(e))?;
@@ -2507,7 +2519,13 @@ mod tests {
 
         let stuck: Vec<_> = (1..=3).map(|n| ev(config, n)).collect();
         let recovery = PatchEvent::boot_lifecycle(
-            config, 1, "c".to_string(), BootOutcome::RecoveredAfterAmbiguity, 1, 2, None,
+            config,
+            1,
+            "c".to_string(),
+            BootOutcome::RecoveredAfterAmbiguity,
+            1,
+            2,
+            None,
         );
         for e in stuck.iter().chain(std::iter::once(&recovery)) {
             crate::with_mut_state(|s| s.queue_event(e.clone()))?;
@@ -2516,7 +2534,9 @@ mod tests {
         // Before rotation the recovery is unreachable: the batch is the first 3.
         let batch = with_state(|s| Ok(s.copy_events(3)))?;
         assert!(
-            !batch.iter().any(|e| e.outcome == Some(BootOutcome::RecoveredAfterAmbiguity)),
+            !batch
+                .iter()
+                .any(|e| e.outcome == Some(BootOutcome::RecoveredAfterAmbiguity)),
             "precondition: the recovery starts behind the stuck head"
         );
 
@@ -2527,7 +2547,8 @@ mod tests {
 
         let next = with_state(|s| Ok(s.copy_events(3)))?;
         assert!(
-            next.iter().any(|e| e.outcome == Some(BootOutcome::RecoveredAfterAmbiguity)),
+            next.iter()
+                .any(|e| e.outcome == Some(BootOutcome::RecoveredAfterAmbiguity)),
             "after rotation the recovery must reach the batch, else it is censored: {next:?}"
         );
         // Nothing was dropped.
@@ -2562,8 +2583,8 @@ mod tests {
             };
             // A and B both load BEFORE either mutates — the precondition for a
             // lost update.
-            let mut a = load();
-            let b = load();
+            let mut a = load()?;
+            let b = load()?;
 
             a.queue_event(PatchEvent::new(
                 config,
@@ -2631,8 +2652,8 @@ mod tests {
         );
 
         // --- recovery: ambiguous death, then success ---
-        crate::report_launch_start()?;               // boot 2 begins
-        init_for_testing(&tmp_dir, None);            // process boundary: classified ambiguous
+        crate::report_launch_start()?; // boot 2 begins
+        init_for_testing(&tmp_dir, None); // process boundary: classified ambiguous
         crate::report_launch_start()?;
         crate::report_launch_success()?;
         let after_recovery = std::fs::read_to_string(&diag).unwrap_or_default();
@@ -2690,7 +2711,10 @@ mod tests {
         tally("[4] B: immediately before success");
 
         let prior = with_state(|s| Ok(s.lifecycle().pointers().boot_attempt_count)).unwrap();
-        eprintln!("DIAG [5] count at success={prior} -> prior_ambiguous = {}", prior.saturating_sub(1));
+        eprintln!(
+            "DIAG [5] count at success={prior} -> prior_ambiguous = {}",
+            prior.saturating_sub(1)
+        );
 
         crate::report_launch_success()?;
         tally("[6] B: after success");
@@ -2836,7 +2860,10 @@ mod tests {
         crate::report_launch_start()?;
         crate::report_launch_failure()?;
 
-        assert!(has_terminal_failure(), "explicit failure is terminal at once");
+        assert!(
+            has_terminal_failure(),
+            "explicit failure is terminal at once"
+        );
         assert!(
             lifecycle_events()
                 .iter()
@@ -2954,7 +2981,10 @@ mod tests {
 
         crate::report_launch_start()?;
         crate::report_launch_failure()?;
-        assert!(patch_is_bad(1), "C2: explicit failure retires on first strike");
+        assert!(
+            patch_is_bad(1),
+            "C2: explicit failure retires on first strike"
+        );
         Ok(())
     }
 
@@ -2975,7 +3005,11 @@ mod tests {
         init_for_testing(&tmp_dir, None);
 
         assert!(!patch_is_bad(2), "patch 2 must not inherit patch 1's tally");
-        assert_eq!(boot_tally().1, Some(2), "the tally must now belong to patch 2");
+        assert_eq!(
+            boot_tally().1,
+            Some(2),
+            "the tally must now belong to patch 2"
+        );
         Ok(())
     }
 
@@ -4156,7 +4190,7 @@ patch_verification: bogus_mode
             // `assert_refused` also checks zero downloads, the tombstone and
             // the single `invalid_signature` event.
             assert_refused(&tmp_dir, result, offered, cause)?;
-            super::with_state(|state| {
+            super::with_mut_state(|state| {
                 assert_eq!(state.next_boot_patch(), None);
                 Ok(())
             })?;

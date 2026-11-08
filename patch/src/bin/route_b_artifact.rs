@@ -56,8 +56,8 @@ fn inflate_with_base(artifact: &[u8], base: Vec<u8>) -> Result<Vec<u8>, String> 
 /// base, this is what would catch it -- before an artifact reached a device and
 /// failed its install hash check with nothing to point at.
 fn verify(container: &[u8], artifact: &[u8]) {
-    let from_empty = inflate_with_base(artifact, Vec::new())
-        .expect("inflate against an empty base");
+    let from_empty =
+        inflate_with_base(artifact, Vec::new()).expect("inflate against an empty base");
     assert_eq!(
         from_empty, container,
         "artifact does not reconstruct the container from an empty base"
@@ -69,8 +69,7 @@ fn verify(container: &[u8], artifact: &[u8]) {
     for (i, b) in noise.iter_mut().enumerate() {
         *b = (i.wrapping_mul(2654435761) >> 13) as u8;
     }
-    let from_noise =
-        inflate_with_base(artifact, noise).expect("inflate against a noise base");
+    let from_noise = inflate_with_base(artifact, noise).expect("inflate against a noise base");
     assert_eq!(
         from_noise, container,
         "artifact is base-DEPENDENT: reconstruction changed with the base"
@@ -99,10 +98,13 @@ fn main() {
     // that is enough to keep the artifact base-INDEPENDENT is not assumed --
     // verify() below reconstructs against a completely different base and
     // requires the same bytes out.
-    let synthetic_base = vec![0u8; std::env::var("ROUTE_B_BASE_LEN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1usize)];
+    let synthetic_base = vec![
+        0u8;
+        std::env::var("ROUTE_B_BASE_LEN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1usize)
+    ];
     let mut artifact = Cursor::new(Vec::new());
     patch::make_patch(synthetic_base, container.clone(), &mut artifact);
     artifact.seek(SeekFrom::Start(0)).unwrap();
@@ -113,7 +115,10 @@ fn main() {
     let mut f = File::create(&args[2]).expect("create output");
     f.write_all(&artifact).expect("write output");
 
-    let hash = Sha256::digest(&container).iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let hash = Sha256::digest(&container)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     println!("container bytes : {}", container.len());
     println!("artifact bytes  : {}", artifact.len());
     println!("verified        : reconstructs from an empty base AND a noise base");

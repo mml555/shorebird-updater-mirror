@@ -43,8 +43,7 @@ fn install_state(lifecycle: &PatchLifecycle, n: usize, size: u64) {
 /// public API cannot reach — a legacy file, or a stale timestamp.
 fn patch_pointers_json(p: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
     let path = p.join("pointers.json");
-    let mut v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     edit(&mut v);
     std::fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
 }
@@ -143,7 +142,11 @@ fn c1_violent_exit_after_success_is_not_a_boot_failure() {
     d.launch_success(1);
     // The user force-quits AFTER the success boundary. Success cleared the
     // breadcrumb, so the next init has nothing to infer from.
-    assert_eq!(d.recover(), None, "a post-success exit must not be recovered");
+    assert_eq!(
+        d.recover(),
+        None,
+        "a post-success exit must not be recovered"
+    );
     assert!(d.is_installed(1));
     assert_eq!(d.pointers().last_booted_patch, Some(1));
 }
@@ -158,7 +161,10 @@ fn c1_many_successful_launches_never_retire_however_violently_they_end() {
         d.launch_success(1);
         assert_eq!(d.recover(), None);
     }
-    assert!(d.is_installed(1), "10 violent exits after success must not retire");
+    assert!(
+        d.is_installed(1),
+        "10 violent exits after success must not retire"
+    );
     assert_eq!(d.pointers().boot_attempt_count, 0);
 }
 
@@ -190,7 +196,10 @@ fn c2_explicit_failure_is_immediate_even_after_prior_ambiguity() {
     d.launch_vanish(1);
     assert!(d.is_installed(1), "one ambiguous death must not retire");
     d.launch_explicit_failure(1);
-    assert!(d.is_bad(1), "explicit failure must not wait for the threshold");
+    assert!(
+        d.is_bad(1),
+        "explicit failure must not wait for the threshold"
+    );
 }
 
 #[test]
@@ -200,7 +209,10 @@ fn c2_retirement_clears_the_breadcrumb_and_the_tally() {
     d.launch_explicit_failure(1);
     let p = d.pointers();
     assert_eq!(p.currently_booting_patch, None);
-    assert_eq!(p.boot_attempt_count, 0, "tally must not leak to the next target");
+    assert_eq!(
+        p.boot_attempt_count, 0,
+        "tally must not leak to the next target"
+    );
     assert_eq!(p.last_boot_attempt_patch, None);
 }
 
@@ -214,7 +226,11 @@ fn c3_single_ambiguous_death_does_not_retire_at_any_threshold_above_one() {
         let d = Device::new(threshold);
         d.install(1);
         d.launch_vanish(1);
-        assert_eq!(d.recover(), None, "threshold {threshold}: must retry, not retire");
+        assert_eq!(
+            d.recover(),
+            None,
+            "threshold {threshold}: must retry, not retire"
+        );
         assert!(d.is_installed(1), "threshold {threshold}");
         assert_eq!(
             d.pointers().next_boot_patch,
@@ -249,7 +265,11 @@ fn c3_success_between_ambiguous_deaths_resets_the_tally() {
     d.launch_vanish(1);
     d.recover();
     d.launch_success(1);
-    assert_eq!(d.pointers().boot_attempt_count, 0, "success must reset the tally");
+    assert_eq!(
+        d.pointers().boot_attempt_count,
+        0,
+        "success must reset the tally"
+    );
     d.launch_vanish(1);
     assert_eq!(d.recover(), None, "non-consecutive deaths must not retire");
     assert!(d.is_installed(1));
@@ -269,7 +289,11 @@ fn c4_retires_exactly_on_the_nth_consecutive_ambiguous_death() {
 
         for i in 1..threshold {
             d.launch_vanish(1);
-            assert_eq!(d.recover(), None, "threshold {threshold}: death {i} must retry");
+            assert_eq!(
+                d.recover(),
+                None,
+                "threshold {threshold}: death {i} must retry"
+            );
             assert!(d.is_installed(1), "threshold {threshold}: death {i}");
         }
 
@@ -279,7 +303,10 @@ fn c4_retires_exactly_on_the_nth_consecutive_ambiguous_death() {
             Some(1),
             "threshold {threshold}: death {threshold} must retire"
         );
-        assert!(d.is_bad(1), "threshold {threshold}: must be Bad at the threshold");
+        assert!(
+            d.is_bad(1),
+            "threshold {threshold}: must be Bad at the threshold"
+        );
     }
 }
 
@@ -332,7 +359,11 @@ fn tally_does_not_transfer_from_one_patch_to_another() {
 
     d.install(2); // patch 2 becomes the boot target
     d.launch_vanish(2);
-    assert_eq!(d.recover(), None, "patch 2 must not inherit patch 1's tally");
+    assert_eq!(
+        d.recover(),
+        None,
+        "patch 2 must not inherit patch 1's tally"
+    );
     assert!(d.is_installed(2));
     assert_eq!(d.pointers().last_boot_attempt_patch, Some(2));
 }
@@ -359,15 +390,17 @@ fn legacy_pointers_without_a_counter_are_treated_as_a_first_attempt() {
     // Pinned as a deliberate decision, not an accident of defaulting.
     let d = Device::new(2);
     d.install(1);
-    let legacy = format!(
-        r#"{{"next_boot_patch":1,"last_booted_patch":null,
-             "currently_booting_patch":1,"boot_started_at":12345}}"#
-    );
+    let legacy = r#"{"next_boot_patch":1,"last_booted_patch":null,
+             "currently_booting_patch":1,"boot_started_at":12345}"#;
     std::fs::write(d.tmp.path().join("pointers.json"), legacy).unwrap();
 
     let p = d.pointers();
     assert_eq!(p.boot_attempt_count, 0, "missing counter must read as 0");
-    assert_eq!(p.currently_booting_patch, Some(1), "breadcrumb must survive");
+    assert_eq!(
+        p.currently_booting_patch,
+        Some(1),
+        "breadcrumb must survive"
+    );
 
     assert_eq!(d.recover(), None, "an upgrading device gets one retry");
     assert!(d.is_installed(1));
@@ -398,7 +431,11 @@ fn recovery_is_a_noop_when_no_boot_was_in_flight() {
     d.install(1);
     assert_eq!(d.recover(), None);
     assert_eq!(d.recover(), None);
-    assert_eq!(d.pointers().boot_attempt_count, 0, "idle inits must not accrue");
+    assert_eq!(
+        d.pointers().boot_attempt_count,
+        0,
+        "idle inits must not accrue"
+    );
     assert!(d.is_installed(1));
 }
 
@@ -429,7 +466,11 @@ fn threshold_one_reproduces_single_strike_behaviour() {
     let d = Device::new(1);
     d.install(1);
     d.launch_vanish(1);
-    assert_eq!(d.recover(), Some(1), "threshold 1 must retire on first death");
+    assert_eq!(
+        d.recover(),
+        Some(1),
+        "threshold 1 must retire on first death"
+    );
     assert!(d.is_bad(1));
 }
 
@@ -451,7 +492,10 @@ fn a_retry_is_classified_as_ambiguous_and_carries_its_attempt() {
         } => {
             assert_eq!(patch, 1);
             assert_eq!(attempt, 1, "first ambiguity must report attempt 1");
-            assert_eq!(threshold, 3, "the in-force threshold travels with the event");
+            assert_eq!(
+                threshold, 3,
+                "the in-force threshold travels with the event"
+            );
             assert!(boot_started_at.is_some(), "boot age must be observable");
         }
         other => panic!("expected Retried, got {other:?}"),

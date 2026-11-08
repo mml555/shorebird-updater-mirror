@@ -22,7 +22,6 @@ const DEFAULT_BASE_URL: &str = "https://api.shorebird.dev";
 /// cbindgen:ignore
 const DEFAULT_CHANNEL: &str = "stable";
 
-
 /// Locks a global, recovering from poisoning **in test builds only**.
 ///
 /// In production a poisoned lock means a thread panicked mid-mutation, and
@@ -68,11 +67,17 @@ fn global_running_patch() -> &'static Mutex<Option<usize>> {
 }
 
 pub fn running_patch_number() -> Option<usize> {
-    *lock_global!(global_running_patch(), "Failed to acquire running_patch lock.")
+    *lock_global!(
+        global_running_patch(),
+        "Failed to acquire running_patch lock."
+    )
 }
 
 pub fn set_running_patch_number(patch_number: Option<usize>) {
-    *lock_global!(global_running_patch(), "Failed to acquire running_patch lock.") = patch_number;
+    *lock_global!(
+        global_running_patch(),
+        "Failed to acquire running_patch lock."
+    ) = patch_number;
 }
 
 /// Unit tests should call this to reset the config between tests.

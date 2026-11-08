@@ -721,6 +721,7 @@ mod tests {
             arch: "aarch64".to_string(),
             client_id: "11111111-2222-3333-4444-555555555555".to_string(),
             current_patch_number: Some(3),
+            supported_patch_kinds: vec!["code".to_string(), "assets".to_string()],
         };
         let debug = format!("{:?}", request);
         assert!(!debug.contains("11111111-2222-3333-4444-555555555555"));
@@ -738,6 +739,7 @@ mod tests {
             arch: "aarch64".to_string(),
             client_id: "11111111-2222-3333-4444-555555555555".to_string(),
             current_patch_number: Some(3),
+            supported_patch_kinds: vec!["code".to_string(), "assets".to_string()],
         };
         // Pinned whole rather than by substring: the docs examples of this
         // line are matched to it character for character.
@@ -758,6 +760,7 @@ mod tests {
             arch: "aarch64".to_string(),
             client_id: "11111111-2222-3333-4444-555555555555".to_string(),
             current_patch_number: Some(3),
+            supported_patch_kinds: vec!["code".to_string(), "assets".to_string()],
         };
         let json_string = serde_json::to_string(&request).unwrap();
         assert_eq!(

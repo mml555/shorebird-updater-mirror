@@ -154,6 +154,9 @@ fn is_read_failure(error: &anyhow::Error) -> bool {
     })
 }
 
+/// The selected patch and, if one was rejected on the way, `(patch_number, error)`.
+pub type PreparedBoot = (Option<PatchInfo>, Option<(usize, anyhow::Error)>);
+
 impl UpdaterState {
     pub fn client_id(&self) -> String {
         self.serialized_state.client_id.clone()
@@ -473,16 +476,15 @@ impl UpdaterState {
     /// persist that tombstone, or to record the boot start for the selected
     /// patch, propagates — the rejected candidate is never returned.
     pub fn prepare_next_boot(&mut self) -> Result<Option<PatchInfo>> {
-        self.prepare_next_boot_reporting().map(|(selected, _)| selected)
+        self.prepare_next_boot_reporting()
+            .map(|(selected, _)| selected)
     }
 
     /// [`Self::prepare_next_boot`], also returning the candidate that was
     /// rejected, if any, as `(patch_number, error)`, so the caller can report it
     /// (upstream's `validate_next_boot_patch` queues a `boot_validation` event
     /// for a rejected candidate; the port keeps that on the prepare path).
-    pub fn prepare_next_boot_reporting(
-        &mut self,
-    ) -> Result<(Option<PatchInfo>, Option<(usize, anyhow::Error)>)> {
+    pub fn prepare_next_boot_reporting(&mut self) -> Result<PreparedBoot> {
         let candidate = self.next_boot_patch().map(|p| p.number);
         let rejected = match self.validate_next_boot_patch() {
             Ok(()) => None,
@@ -671,6 +673,7 @@ mod tests {
     use super::*;
     use crate::cache::lifecycle::BadReason;
     use crate::test_utils::install_fake_patch_into;
+    use serial_test::serial;
     use tempfile::TempDir;
 
     fn load(tmp: &TempDir, release_version: &str) -> UpdaterState {
@@ -724,6 +727,9 @@ mod tests {
     // disagree exactly when a candidate was rejected, which is how the defect
     // survived.
 
+    // Writes the process-global running patch, so it must not overlap the
+    // `#[serial]` tests that read it.
+    #[serial]
     #[test]
     fn prepare_returns_the_candidate_when_it_validates() {
         let tmp = TempDir::new().unwrap();
@@ -737,6 +743,9 @@ mod tests {
         assert_eq!(state.running_patch().map(|p| p.number), Some(2));
     }
 
+    // Writes the process-global running patch, so it must not overlap the
+    // `#[serial]` tests that read it.
+    #[serial]
     #[test]
     fn prepare_falls_back_and_attributes_the_fallback_not_the_candidate() {
         // THE LOAD-BEARING REGRESSION. Patch 1 known-good, patch 2 present but
@@ -773,6 +782,9 @@ mod tests {
         );
     }
 
+    // Writes the process-global running patch, so it must not overlap the
+    // `#[serial]` tests that read it.
+    #[serial]
     #[test]
     fn prepare_success_after_fallback_keeps_the_fallback_installed() {
         // The consequence the device run exposed: with correct attribution a
@@ -808,6 +820,9 @@ mod tests {
         ));
     }
 
+    // Writes the process-global running patch, so it must not overlap the
+    // `#[serial]` tests that read it.
+    #[serial]
     #[test]
     fn prepare_returns_base_when_the_only_candidate_is_rejected() {
         let tmp = TempDir::new().unwrap();
@@ -825,6 +840,9 @@ mod tests {
         assert_eq!(strict.running_patch().map(|p| p.number), None);
     }
 
+    // Writes the process-global running patch, so it must not overlap the
+    // `#[serial]` tests that read it.
+    #[serial]
     #[test]
     fn prepare_attribution_survives_a_later_pointer_change() {
         // Why attribution is bound to the RETURNED patch and not re-read later:
