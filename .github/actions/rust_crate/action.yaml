@@ -30,6 +30,9 @@ runs:
       # sees (an unresolvable host), and a proxy's CONNECT refusal is a
       # different error. Runner users have no DNS, so the direct attempt fails
       # the way those tests expect. Elsewhere no proxy is set and this is a no-op.
+      # The updater itself doesn't yet count a proxy's refusal (ureq
+      # ConnectProxyFailed) as a network error; that is a tracked follow-up,
+      # since changing it means a new updater revision.
       run: |
         cargo test --no-run
         env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY \
