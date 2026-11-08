@@ -94,6 +94,9 @@ jobs:
     if: ${{ needs.changes.outputs.needs_rust_build != '[]' }}
 
     strategy:
+      # One OS failing (or a hosted leg not starting) must not cancel the
+      # self-hosted Linux legs, whose result stands on its own.
+      fail-fast: false
       matrix:
         crate: ${{ fromJSON(needs.changes.outputs.needs_rust_build) }}
         os: [macos-latest, windows-latest, ubuntu-latest]
@@ -120,6 +123,7 @@ jobs:
     if: ${{ contains(fromJSON(needs.changes.outputs.needs_rust_build), 'library') }}
 
     strategy:
+      fail-fast: false
       matrix:
         include:
           # Stays on the hosted runner: ci-build has no Android NDK, and cargo-ndk
