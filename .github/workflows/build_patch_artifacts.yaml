@@ -20,7 +20,7 @@ on:
 
 jobs:
   create-draft:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, updater]
     name: 📝 Create Draft Release
     steps:
       - env:
@@ -35,21 +35,28 @@ jobs:
     needs: create-draft
     strategy:
       matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: aarch64-apple-darwin
-            os: macos-latest
-          - os: windows-latest
+        # "linux" is the self-hosted runner; the macOS and Windows legs need
+        # hosted runners and only exist when HOSTED_RUNNERS is 'true'.
+        include: ${{ fromJSON(vars.HOSTED_RUNNERS == 'true' && '[{"target":"x86_64-unknown-linux-musl","os":"linux"},{"target":"x86_64-apple-darwin","os":"macos-latest"},{"target":"aarch64-apple-darwin","os":"macos-latest"},{"os":"windows-latest"}]' || '[{"target":"x86_64-unknown-linux-musl","os":"linux"}]') }}
 
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'linux' && fromJSON('["self-hosted","linux","x64","updater"]') || matrix.os }}
 
     name: 🦀 Upload Artifacts
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The musl target needs the rustup target and musl-gcc on ci-build, and
+      # the upload action shells out to gh.
+      - name: 🐧 Install musl and gh
+        if: ${{ matrix.os == 'linux' }}
+        run: |
+          rustup target add "${{ matrix.target }}"
+          for tool in musl-gcc gh; do
+            command -v "$tool" >/dev/null && continue
+            pkg=musl-tools; [ "$tool" = gh ] && pkg=gh
+            sudo apt-get install -y --no-install-recommends "$pkg"
+          done
       - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           bin: "patch"
@@ -58,9 +65,13 @@ jobs:
           zip: all
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # Gated on HOSTED_RUNNERS: a published release is immutable, so it must not
+  # go out with only the Linux binary. Without the variable the draft is left
+  # for a re-run (with the variable set) to fill and publish.
   publish:
     needs: upload-artifacts
-    runs-on: ubuntu-latest
+    if: ${{ vars.HOSTED_RUNNERS == 'true' }}
+    runs-on: [self-hosted, linux, x64, updater]
     name: 🚀 Publish Release
     steps:
       - env:

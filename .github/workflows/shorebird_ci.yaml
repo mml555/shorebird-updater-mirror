@@ -66,8 +66,7 @@ jobs:
 
   cspell:
     name: CSpell
-    # Stays hosted: npx needs Node, which ci-build is not known to have.
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, updater]
     # npx installs cspell's dependencies unpinned, so the job gets a
     # read-only token and checkout doesn't leave it in .git/config.
     permissions:
