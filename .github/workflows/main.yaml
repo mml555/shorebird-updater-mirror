@@ -109,6 +109,10 @@ jobs:
     runs-on: ${{ matrix.os == 'linux' && fromJSON('["self-hosted","linux","x64","updater"]') || matrix.os }}
 
     name: 🦀 Build ${{ matrix.crate }} (${{ matrix.os }})
+    # A DNS lookup the runner can't make waits out libc's timeout, so the
+    # no-network tests are slow but bounded; cap the job so a hang can't hold
+    # the runner.
+    timeout-minutes: 45
 
     steps:
       - name: 📚 Git Checkout
