@@ -1,4 +1,4 @@
-# cspell:words dorny
+# cspell:words binstall dorny
 name: ci
 
 concurrency:
