@@ -27,6 +27,8 @@ permissions:
 
 jobs:
   changes:
+    # Public repository: a fork's pull request runs nothing on the home runner.
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64, updater]
     permissions:
       contents: read
@@ -81,6 +83,7 @@ jobs:
 
   cspell:
     name: CSpell
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64, updater]
     # npx installs cspell's dependencies unpinned, so the job gets a
     # read-only token and checkout doesn't leave it in .git/config.
@@ -95,7 +98,7 @@ jobs:
 
   required:
     name: required
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     needs:
       - changes
       - shorebird_code_push
